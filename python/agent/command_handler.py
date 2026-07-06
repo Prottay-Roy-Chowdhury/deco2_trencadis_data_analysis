@@ -1,0 +1,318 @@
+import os
+import threading
+from typing import Dict, Any
+from helpers.session_manager import load_session
+
+from agent.protocol import ok_response, error_response
+from agent.job_manager import JobManager
+from agent.file_sender import FileSender
+
+
+class CommandHandler:
+    def __init__(self):
+        self.jobs = JobManager()
+
+    def handle(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        command = message.get("command")
+
+        if not command:
+            return error_response("Missing command.")
+
+        if command == "ping":
+            return self.handle_ping()
+
+        if command == "get_status":
+            return self.handle_get_status(message)
+
+        if command == "list_jobs":
+            return self.handle_list_jobs()
+
+        if command == "get_file_metadata":
+            return self.handle_get_file_metadata(message)
+
+        if command == "capture":
+            return self.handle_capture(message)
+
+        if command == "transform":
+            return self.handle_transform(message)
+
+        if command == "process":
+            return self.handle_process(message)
+        
+        if command == "list_downloadable_outputs":
+            return self.handle_list_downloadable_outputs(message)
+
+        return error_response(f"Unknown command: {command}")
+
+    def handle_ping(self):
+        return ok_response(message="Python Agent is alive.")
+
+    def handle_get_status(self, message):
+        job_id = message.get("job_id")
+
+        if not job_id:
+            return error_response("Missing job_id.")
+
+        try:
+            job = self.jobs.get_job(job_id)
+            return ok_response(job=job)
+        except KeyError as e:
+            return error_response(str(e))
+
+    def handle_list_jobs(self):
+        return ok_response(jobs=self.jobs.list_jobs())
+
+    # def handle_get_file_metadata(self, message):
+    #     path = message.get("path")
+
+    #     if not path:
+    #         return error_response("Missing file path.")
+
+    #     try:
+    #         return ok_response(file=file_metadata(path))
+    #     except Exception as e:
+    #         return error_response(str(e))
+
+    def handle_capture(self, message):
+        job_id = self.jobs.create_job("capture")
+
+        self.jobs.update_job(
+            job_id,
+            status="queued",
+            progress=0,
+            message="Capture job submitted."
+        )
+
+        thread = threading.Thread(
+            target=self._run_capture_job,
+            args=(job_id, message),
+            daemon=True
+        )
+        thread.start()
+
+        return ok_response(
+            job_id=job_id,
+            message="Capture job submitted.",
+            job=self.jobs.get_job(job_id)
+        )
+    
+    def _run_capture_job(self, job_id, message):
+        try:
+            self.jobs.update_job(
+                job_id,
+                status="running",
+                progress=10,
+                message="Starting capture."
+            )
+
+            from capture import CaptureTexturedPointCloud
+
+            app = CaptureTexturedPointCloud()
+
+            self.jobs.update_job(
+                job_id,
+                progress=25,
+                message="Camera capture script initialized."
+            )
+
+            result = app.run_capture_from_config(message)
+
+            if result.get("status") != "ok":
+                self.jobs.update_job(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    message=result.get("message", "Capture failed."),
+                    error=result.get("message", "Capture failed."),
+                    result=result
+                )
+                return
+
+            self.jobs.update_job(
+                job_id,
+                status="finished",
+                progress=100,
+                message="Capture finished.",
+                result=result
+            )
+
+        except Exception as e:
+            self.jobs.update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                message="Capture exception.",
+                error=str(e)
+            )
+
+    def handle_transform(self, message):
+        job_id = self.jobs.create_job("transform")
+
+        self.jobs.update_job(
+            job_id,
+            status="queued",
+            progress=0,
+            message="Transform job submitted."
+        )
+
+        thread = threading.Thread(
+            target=self._run_transform_job,
+            args=(job_id, message),
+            daemon=True
+        )
+        thread.start()
+
+        return ok_response(
+            job_id=job_id,
+            message="Transform job submitted.",
+            job=self.jobs.get_job(job_id)
+        )
+    
+    def _run_transform_job(self, job_id, message):
+        try:
+            self.jobs.update_job(
+                job_id,
+                status="running",
+                progress=10,
+                message="Starting transform."
+            )
+
+            from transform import run_transform_from_config
+
+            result = run_transform_from_config(message)
+
+            if result.get("status") != "ok":
+                self.jobs.update_job(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    message=result.get("message", "Transform failed."),
+                    error=result.get("message", "Transform failed."),
+                    result=result
+                )
+                return
+
+            self.jobs.update_job(
+                job_id,
+                status="finished",
+                progress=100,
+                message="Transform finished.",
+                result=result
+            )
+
+        except Exception as e:
+            import traceback
+            err = traceback.format_exc()
+
+            self.jobs.update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                message="Transform exception.",
+                error=err
+            )
+
+            print(err)
+
+    def handle_process(self, message):
+        job_id = self.jobs.create_job("process")
+
+        self.jobs.update_job(
+            job_id,
+            status="queued",
+            progress=0,
+            message="Processing command received."
+        )
+
+        # Later this will call processing script non-interactive API.
+
+        self.jobs.update_job(
+            job_id,
+            status="finished",
+            progress=100,
+            message="Processing placeholder finished.",
+            result={
+                "note": "Processing integration not connected yet.",
+                "received_payload": message,
+            }
+        )
+
+        return ok_response(
+            job_id=job_id,
+            message="Processing job created.",
+            job=self.jobs.get_job(job_id)
+        )
+    
+    def handle_list_downloadable_outputs(self, message):
+        
+
+        session_name = message.get("session")
+        output_index = int(message.get("output_index", 1))
+
+        requested_types = message.get("file_types", ["pointcloud", "image", "json"])
+
+        if isinstance(requested_types, str):
+            requested_types = [requested_types]
+
+        requested_types = {
+            str(t).strip().lower()
+            for t in requested_types
+        }
+
+        category_aliases = {
+            "pointcloud": "pointclouds",
+            "pointclouds": "pointclouds",
+            "pcd": "pointclouds",
+            "ply": "pointclouds",
+            "image": "images",
+            "images": "images",
+            "img": "images",
+            "png": "images",
+            "json": "json",
+        }
+
+        allowed_categories = {
+            category_aliases[t]
+            for t in requested_types
+            if t in category_aliases
+        }
+
+        paths = load_session(".", session_name)
+
+        files = {
+            "pointclouds": [],
+            "images": [],
+            "json": []
+        }
+
+        candidates = [
+            ("pointclouds", paths.merged_point_clouds / f"merged{output_index:02d}.ply"),
+            ("pointclouds", paths.merged_point_clouds / f"eye_to_base_point_cloud_{output_index:02d}.ply"),
+            ("pointclouds", paths.initial_point_clouds / f"point_cloud_{output_index:02d}.ply"),
+            ("images", paths.merged_images / f"stitched_rgb_{output_index:02d}.png"),
+            ("images", paths.merged_depth_images / f"stitched_height_{output_index:02d}.png"),
+            ("images", paths.initial_images / f"image_{output_index:02d}.png"),
+            ("images", paths.initial_depth_images / f"depth_{output_index:02d}.png"),
+            ("images", paths.initial_depth_images / f"depth_rendered_{output_index:02d}.png"),
+            # Add JSON candidates later when your result JSON exists
+        ]
+
+        for category, path in candidates:
+            if allowed_categories and category not in allowed_categories:
+                continue
+
+            print(f"[download-list] checking {category}: {path} exists={path.exists()}")
+
+            if path.exists():
+                files[category].append({
+                    "name": path.name,
+                    "path": str(path.resolve()),
+                    "size": os.path.getsize(path)
+                })
+
+        return ok_response(
+            message="Downloadable outputs listed.",
+            session=paths.session_name,
+            output_index=output_index,
+            files=files
+        )
