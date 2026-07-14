@@ -5,7 +5,7 @@ from helpers.session_manager import load_session
 
 from agent.protocol import ok_response, error_response
 from agent.job_manager import JobManager
-from agent.file_sender import FileSender
+# from agent.file_sender import FileSender
 
 
 class CommandHandler:
@@ -215,33 +215,121 @@ class CommandHandler:
             print(err)
 
     def handle_process(self, message):
+        """
+        Creates a background processing job.
+
+        The received message is passed directly to:
+            processing.run_processing_from_config(message)
+
+        Expected message fields may include:
+            session
+            output_index
+            input_kind
+            show_preview
+            preview_time_sec
+            color_grouping_method
+            gmm_max_groups
+            gmm_merge_distance
+            params
+        """
         job_id = self.jobs.create_job("process")
 
         self.jobs.update_job(
             job_id,
             status="queued",
             progress=0,
-            message="Processing command received."
+            message="Processing job submitted."
         )
 
-        # Later this will call processing script non-interactive API.
-
-        self.jobs.update_job(
-            job_id,
-            status="finished",
-            progress=100,
-            message="Processing placeholder finished.",
-            result={
-                "note": "Processing integration not connected yet.",
-                "received_payload": message,
-            }
+        thread = threading.Thread(
+            target=self._run_process_job,
+            args=(job_id, dict(message)),
+            daemon=True
         )
+        thread.start()
 
         return ok_response(
             job_id=job_id,
-            message="Processing job created.",
+            message="Processing job submitted.",
             job=self.jobs.get_job(job_id)
         )
+
+
+    def _run_process_job(self, job_id, message):
+        """
+        Executes processing.py through its non-interactive API.
+        """
+        try:
+            self.jobs.update_job(
+                job_id,
+                status="running",
+                progress=5,
+                message="Starting processing."
+            )
+
+            # processing.py must be importable from the Python project root.
+            from processing import run_processing_from_config
+
+            self.jobs.update_job(
+                job_id,
+                progress=15,
+                message="Processing module loaded."
+            )
+
+            # Remove the agent command before passing the config.
+            # processing.py does not need it, although leaving it would not
+            # normally affect config.get(...) calls.
+            processing_config = dict(message)
+            processing_config.pop("command", None)
+
+            result = run_processing_from_config(
+                processing_config
+            )
+
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "processing.run_processing_from_config() "
+                    "did not return a dictionary."
+                )
+
+            if result.get("status") != "ok":
+                failure_message = result.get(
+                    "message",
+                    "Processing failed."
+                )
+
+                self.jobs.update_job(
+                    job_id,
+                    status="failed",
+                    progress=100,
+                    message=failure_message,
+                    error=failure_message,
+                    result=result
+                )
+                return
+
+            self.jobs.update_job(
+                job_id,
+                status="finished",
+                progress=100,
+                message="Processing finished.",
+                result=result
+            )
+
+        except Exception:
+            import traceback
+
+            error_text = traceback.format_exc()
+
+            self.jobs.update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                message="Processing exception.",
+                error=error_text
+            )
+
+            print(error_text)
     
     def handle_list_downloadable_outputs(self, message):
         
@@ -285,16 +373,80 @@ class CommandHandler:
             "json": []
         }
 
-        candidates = [
-            ("pointclouds", paths.merged_point_clouds / f"merged{output_index:02d}.ply"),
-            ("pointclouds", paths.merged_point_clouds / f"eye_to_base_point_cloud_{output_index:02d}.ply"),
-            ("pointclouds", paths.initial_point_clouds / f"point_cloud_{output_index:02d}.ply"),
-            ("images", paths.merged_images / f"stitched_rgb_{output_index:02d}.png"),
-            ("images", paths.merged_depth_images / f"stitched_height_{output_index:02d}.png"),
-            ("images", paths.initial_images / f"image_{output_index:02d}.png"),
-            ("images", paths.initial_depth_images / f"depth_{output_index:02d}.png"),
-            ("images", paths.initial_depth_images / f"depth_rendered_{output_index:02d}.png"),
-            # Add JSON candidates later when your result JSON exists
+        candidates = [        
+            # Point clouds
+            (
+                "pointclouds",
+                paths.merged_point_clouds
+                / f"merged{output_index:02d}.ply"
+            ),
+            (
+                "pointclouds",
+                paths.merged_point_clouds
+                / f"eye_to_base_point_cloud_{output_index:02d}.ply"
+            ),
+            (
+                "pointclouds",
+                paths.initial_point_clouds
+                / f"point_cloud_{output_index:02d}.ply"
+            ),
+
+            # Images
+            (
+                "images",
+                paths.merged_images
+                / f"stitched_rgb_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.merged_depth_images
+                / f"stitched_height_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.merged_images
+                / f"eye_to_base_rgb_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.merged_depth_images
+                / f"eye_to_base_height_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.initial_images
+                / f"image_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.initial_depth_images
+                / f"depth_{output_index:02d}.png"
+            ),
+            (
+                "images",
+                paths.initial_depth_images
+                / f"depth_rendered_{output_index:02d}.png"
+            ),
+
+            # Processing outputs
+            (
+                "json",
+                paths.exported_data
+                / f"processed_clusters_{output_index:02d}.json"
+            ),
+            (
+                "json",
+                paths.exported_data
+                / f"processing_params_used_{output_index:02d}.json"
+            ),
+
+            # The report is text, but it can temporarily travel in the JSON/data
+            # category until you add a separate "report" file type.
+            (
+                "json",
+                paths.exported_data
+                / f"processing_report_{output_index:02d}.txt"
+            ),
         ]
 
         for category, path in candidates:
