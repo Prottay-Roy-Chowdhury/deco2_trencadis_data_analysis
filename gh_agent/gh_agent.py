@@ -1,8 +1,9 @@
-from email.mime import message
 import socket
 import traceback
 import threading
 import time
+import json
+from pathlib import Path
 from datetime import datetime
 
 from gh_agent.config import (
@@ -44,6 +45,7 @@ class GrasshopperAgent:
         self.latest_result = None
         self.latest_error = None
         self.latest_log = []
+        self.manifest_lock = threading.Lock()
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -61,13 +63,19 @@ class GrasshopperAgent:
         print(f"[gh-agent-log] {line}")
 
     def set_latest(
-            self,
-            job_id=None,
-            status=None,
-            message=None,
-            result=None,
-            error=None):
+        self,
+        job_id=None,
+        status=None,
+        message=None,
+        result=None,
+        error=None,
+        clear_error=False
+    ):
+        """
+        Updates the latest GH Agent state.
 
+        Set clear_error=True after a successful job to remove an older error.
+        """
         with self.lock:
             if job_id is not None:
                 self.latest_job_id = job_id
@@ -81,8 +89,12 @@ class GrasshopperAgent:
             if result is not None:
                 self.latest_result = result
 
-            if error is not None:
-                self.latest_error = error
+            if clear_error:
+                self.latest_error = None
+
+            elif error is not None:
+                self.latest_error = error      
+        
 
     def get_latest_status(self):
         with self.lock:
@@ -185,6 +197,572 @@ class GrasshopperAgent:
             latest_status="submitted"
         )
     
+    def get_session_manifest_path(
+        self,
+        session_name,
+        create_session_folder=False
+    ):
+        """
+        Returns the per-session manifest path.
+
+        The folder is created only when explicitly requested, normally
+        during a real download or manifest save.
+        """
+        safe_session = str(session_name).strip()
+
+        if not safe_session:
+            raise ValueError(
+                "Session name cannot be empty."
+            )
+
+        session_root = RECEIVED_ROOT / safe_session
+
+        if create_session_folder:
+            session_root.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+        return session_root / "download_manifest.json"
+
+
+    def create_empty_session_manifest(self, session_name):
+        """
+        Creates the default in-memory structure for one session.
+        """
+        return {
+            "session": str(session_name),
+            "updated_at": None,
+            "outputs": {}
+        }
+
+
+    def load_session_manifest(self, session_name):
+        """
+        Loads one session's local download manifest.
+
+        Missing or invalid manifests return an empty structure.
+        """
+        manifest_path = self.get_session_manifest_path(
+            session_name,
+            create_session_folder=False
+        )
+
+        if not manifest_path.exists():
+            return self.create_empty_session_manifest(
+                session_name
+            )
+
+        try:
+            with open(
+                manifest_path,
+                "r",
+                encoding="utf-8"
+            ) as file:
+                manifest = json.load(file)
+
+        except Exception as exc:
+            self.write_log(
+                f"Failed to read manifest for "
+                f"{session_name}: {exc}"
+            )
+
+            return self.create_empty_session_manifest(
+                session_name
+            )
+
+        if not isinstance(manifest, dict):
+            manifest = self.create_empty_session_manifest(
+                session_name
+            )
+
+        manifest["session"] = str(session_name)
+
+        if not isinstance(
+            manifest.get("outputs"),
+            dict
+        ):
+            manifest["outputs"] = {}
+
+        return manifest
+
+
+    def save_session_manifest(
+        self,
+        session_name,
+        manifest
+    ):
+        """
+        Saves one session manifest atomically.
+        """
+        manifest_path = self.get_session_manifest_path(
+            session_name,
+            create_session_folder=True
+        )
+
+        manifest["session"] = str(session_name)
+        manifest["updated_at"] = (
+            datetime.now().isoformat(
+                timespec="seconds"
+            )
+        )
+
+        temporary_path = manifest_path.with_suffix(
+            ".json.tmp"
+        )
+
+        with open(
+            temporary_path,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                manifest,
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        temporary_path.replace(
+            manifest_path
+        )
+    
+    def infer_download_category(
+        self,
+        file_type,
+        filename
+    ):
+        """
+        Infers the logical category from the downloaded filename.
+        """
+        file_type = str(
+            file_type
+        ).strip().lower()
+
+        name = str(
+            filename
+        ).strip().lower()
+
+        if file_type == "pointclouds":
+            if name.startswith(
+                "eye_to_base_point_cloud_"
+            ):
+                return "eye_to_base_pointcloud"
+
+            if name.startswith("merged"):
+                return "merged_pointcloud"
+
+            if name.startswith(
+                "point_cloud_"
+            ):
+                return "initial_pointcloud"
+
+        elif file_type == "images":
+            if name.startswith(
+                "stitched_rgb_"
+            ):
+                return "stitched_rgb"
+
+            if name.startswith(
+                "stitched_height_"
+            ):
+                return "stitched_height"
+
+            if name.startswith(
+                "eye_to_base_rgb_"
+            ):
+                return "eye_to_base_rgb"
+
+            if name.startswith(
+                "eye_to_base_height_"
+            ):
+                return "eye_to_base_height"
+
+            if name.startswith(
+                "depth_rendered_"
+            ):
+                return "initial_depth_rendered"
+
+            if name.startswith(
+                "depth_"
+            ):
+                return "initial_depth"
+
+            if name.startswith(
+                "image_"
+            ):
+                return "initial_rgb"
+
+        elif file_type == "json":
+            if name.startswith(
+                "processed_clusters_"
+            ):
+                return "processed_clusters"
+
+            if name.startswith(
+                "processing_params_used_"
+            ):
+                return "processing_params"
+
+            if name.startswith(
+                "processing_report_"
+            ):
+                return "processing_report"
+
+        return "unknown"
+    
+    def build_manifest_file_entry(
+        self,
+        file_type,
+        downloaded_item
+    ):
+        """
+        Converts one successful download result into a manifest entry.
+        """
+        local_path = str(
+            downloaded_item.get(
+                "local_path",
+                ""
+            )
+        )
+
+        path = Path(local_path)
+
+        name = str(
+            downloaded_item.get(
+                "name",
+                path.name
+            )
+        )
+
+        remote_path = str(
+            downloaded_item.get(
+                "remote_path",
+                ""
+            )
+        )
+
+        exists = path.exists()
+
+        size = (
+            path.stat().st_size
+            if exists
+            else None
+        )
+
+        return {
+            "name": name,
+            "category": (
+                self.infer_download_category(
+                    file_type,
+                    name
+                )
+            ),
+            "local_path": local_path,
+            "remote_path": remote_path,
+            "size": size,
+            "exists": bool(exists),
+            "downloaded_at": (
+                datetime.now().isoformat(
+                    timespec="seconds"
+                )
+            )
+        }
+
+
+    def upsert_manifest_entry(
+        self,
+        entries,
+        new_entry
+    ):
+        """
+        Updates an existing file entry or appends a new one.
+
+        Uniqueness is based on category + filename.
+        """
+        new_name = str(
+            new_entry.get(
+                "name",
+                ""
+            )
+        ).lower()
+
+        new_category = str(
+            new_entry.get(
+                "category",
+                ""
+            )
+        ).lower()
+
+        for index, existing in enumerate(
+            entries
+        ):
+            existing_name = str(
+                existing.get(
+                    "name",
+                    ""
+                )
+            ).lower()
+
+            existing_category = str(
+                existing.get(
+                    "category",
+                    ""
+                )
+            ).lower()
+
+            if (
+                existing_name == new_name
+                and existing_category
+                == new_category
+            ):
+                entries[index] = new_entry
+                return
+
+        entries.append(new_entry)
+
+
+    def update_session_manifest_from_downloads(
+        self,
+        session_name,
+        output_index,
+        downloaded_items
+    ):
+        """
+        Merges successful downloads into one session/output manifest.
+        """
+        output_key = str(
+            int(output_index)
+        )
+
+        with self.manifest_lock:
+            manifest = self.load_session_manifest(
+                session_name
+            )
+
+            outputs = manifest.setdefault(
+                "outputs",
+                {}
+            )
+
+            output_entry = outputs.setdefault(
+                output_key,
+                {
+                    "pointclouds": [],
+                    "images": [],
+                    "json": []
+                }
+            )
+
+            for file_type in (
+                "pointclouds",
+                "images",
+                "json"
+            ):
+                if not isinstance(
+                    output_entry.get(file_type),
+                    list
+                ):
+                    output_entry[file_type] = []
+
+            for item in downloaded_items:
+                file_type = str(
+                    item.get(
+                        "category",
+                        ""
+                    )
+                ).strip().lower()
+
+                if file_type not in (
+                    "pointclouds",
+                    "images",
+                    "json"
+                ):
+                    continue
+
+                local_path = Path(
+                    item.get(
+                        "local_path",
+                        ""
+                    )
+                )
+
+                if (
+                    not local_path.exists()
+                    or not local_path.is_file()
+                ):
+                    self.write_log(
+                        f"Manifest skipped missing local file: "
+                        f"{local_path}"
+                    )
+                    continue
+
+                manifest_entry = (
+                    self.build_manifest_file_entry(
+                        file_type,
+                        item
+                    )
+                )
+
+                self.upsert_manifest_entry(
+                    output_entry[file_type],
+                    manifest_entry
+                )
+
+            self.save_session_manifest(
+                session_name,
+                manifest
+            )
+
+    def list_local_downloads(
+        self,
+        session_name,
+        output_index,
+        file_types=None,
+        categories=None
+    ):
+        """
+        Reads locally downloaded files for one session and output.
+
+        file_types:
+            broad types such as pointcloud, image, json
+
+        categories:
+            specific selectors such as stitched_rgb,
+            processed_clusters, eye_to_base_pointcloud
+        """
+        manifest = self.load_session_manifest(
+            session_name
+        )
+
+        output_key = str(
+            int(output_index)
+        )
+
+        output_entry = manifest.get(
+            "outputs",
+            {}
+        ).get(
+            output_key,
+            {}
+        )
+
+        type_aliases = {
+            "pointcloud": "pointclouds",
+            "pointclouds": "pointclouds",
+            "pcd": "pointclouds",
+            "ply": "pointclouds",
+
+            "image": "images",
+            "images": "images",
+            "img": "images",
+            "png": "images",
+
+            "json": "json",
+        }
+
+        if isinstance(file_types, str):
+            file_types = [
+                file_types
+            ]
+
+        requested_types = set()
+
+        for value in (
+            file_types
+            or [
+                "pointcloud",
+                "image",
+                "json"
+            ]
+        ):
+            normalized = str(
+                value
+            ).strip().lower()
+
+            mapped = type_aliases.get(
+                normalized
+            )
+
+            if mapped:
+                requested_types.add(mapped)
+
+        if isinstance(categories, str):
+            categories = [
+                value.strip()
+                for value in categories.split(",")
+                if value.strip()
+            ]
+
+        requested_categories = {
+            str(value).strip().lower()
+            for value in (
+                categories
+                or []
+            )
+            if str(value).strip()
+        }
+
+        files = {
+            "pointclouds": [],
+            "images": [],
+            "json": []
+        }
+
+        for file_type in files.keys():
+            if file_type not in requested_types:
+                continue
+
+            stored_entries = output_entry.get(
+                file_type,
+                []
+            )
+
+            if not isinstance(
+                stored_entries,
+                list
+            ):
+                continue
+
+            for stored_entry in stored_entries:
+                item = dict(stored_entry)
+
+                local_path = Path(
+                    item.get(
+                        "local_path",
+                        ""
+                    )
+                )
+
+                item["exists"] = (
+                    local_path.exists()
+                )
+
+                if item["exists"]:
+                    item["size"] = (
+                        local_path.stat().st_size
+                    )
+
+                category = str(
+                    item.get(
+                        "category",
+                        "unknown"
+                    )
+                ).lower()
+
+                if (
+                    requested_categories
+                    and category
+                    not in requested_categories
+                ):
+                    continue
+
+                files[file_type].append(
+                    item
+                )
+
+        return files
+
     def start_download_job(self, message):
         download_job_id = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
@@ -214,26 +792,46 @@ class GrasshopperAgent:
     def _run_download_job(self, job_id, message):
         try:
             session = message.get("session")
-            output_index = int(message.get("output_index", 1))
+            output_index = int(
+                message.get(
+                    "output_index",
+                    1
+                )
+            )
 
-            requested_types = message.get("file_types", ["pointcloud", "image", "json"])
+            requested_types = message.get(
+                "file_types",
+                [
+                    "pointcloud",
+                    "image",
+                    "json"
+                ]
+            )
 
             if isinstance(requested_types, str):
-                requested_types = [requested_types]
+                requested_types = [
+                    requested_types
+                ]
 
             requested_types = [
-                str(t).strip().lower()
-                for t in requested_types
+                str(file_type).strip().lower()
+                for file_type in requested_types
             ]
 
             self.set_latest(
                 job_id=job_id,
                 status="download_running",
-                message=f"Listing downloadable files: {requested_types}"
+                message=(
+                    f"Listing downloadable files: "
+                    f"{requested_types}"
+                )
             )
 
             self.write_log(
-                f"Download running: session={session}, output_index={output_index}, file_types={requested_types}"
+                f"Download running: "
+                f"session={session}, "
+                f"output_index={output_index}, "
+                f"file_types={requested_types}"
             )
 
             listing = self.python_client.send_command({
@@ -247,16 +845,30 @@ class GrasshopperAgent:
                 self.set_latest(
                     job_id=job_id,
                     status="download_failed",
-                    message=listing.get("message", "Failed to list downloadable outputs."),
+                    message=listing.get(
+                        "message",
+                        "Failed to list downloadable outputs."
+                    ),
                     error=listing
                 )
-                self.write_log(f"Download failed while listing files: {listing}")
+
+                self.write_log(
+                    f"Download failed while listing files: "
+                    f"{listing}"
+                )
                 return
 
             saved = []
-            files = listing.get("files", {})
+            files = listing.get(
+                "files",
+                {}
+            )
 
-            total = sum(len(items) for items in files.values())
+            total = sum(
+                len(items)
+                for items in files.values()
+            )
+
             count = 0
 
             for category, items in files.items():
@@ -267,23 +879,32 @@ class GrasshopperAgent:
                     name = item["name"]
 
                     local_path = (
-                        RECEIVED_ROOT /
-                        listing["session"] /
-                        category /
-                        name
+                        RECEIVED_ROOT
+                        / listing["session"]
+                        / category
+                        / name
                     )
 
                     self.set_latest(
                         job_id=job_id,
                         status="download_running",
-                        message=f"Downloading {count}/{total}: {name}"
+                        message=(
+                            f"Downloading "
+                            f"{count}/{total}: "
+                            f"{name}"
+                        )
                     )
 
-                    self.write_log(f"Downloading {name} → {local_path}")
+                    self.write_log(
+                        f"Downloading {name} "
+                        f"→ {local_path}"
+                    )
 
-                    result = self.python_client.download_file(
-                        remote_path,
-                        local_path
+                    result = (
+                        self.python_client.download_file(
+                            remote_path,
+                            local_path
+                        )
                     )
 
                     saved.append({
@@ -294,28 +915,57 @@ class GrasshopperAgent:
                         "result": result
                     })
 
+            # This stays outside both download loops.
+            self.update_session_manifest_from_downloads(
+                session_name=listing["session"],
+                output_index=output_index,
+                downloaded_items=saved
+            )
+
+            manifest_path = self.get_session_manifest_path(
+                listing["session"]
+            )
+
             self.set_latest(
                 job_id=job_id,
                 status="download_finished",
-                message=f"Downloaded {len(saved)} file(s).",
-                result=saved,
-                error=None
+                message=(
+                    f"Downloaded {len(saved)} file(s) "
+                    f"and updated the session manifest."
+                ),
+                result={
+                    "session": listing["session"],
+                    "output_index": output_index,
+                    "saved": saved,
+                    "manifest_path": str(
+                        manifest_path
+                    )
+                },
+                clear_error=True
             )
 
-            self.write_log(f"Download finished: {len(saved)} file(s).")
+            self.write_log(
+                f"Download finished: "
+                f"{len(saved)} file(s). "
+                f"Manifest: {manifest_path}"
+            )
 
-        except Exception as e:
-            err = traceback.format_exc()
+        except Exception:
+            error_text = traceback.format_exc()
 
             self.set_latest(
                 job_id=job_id,
                 status="download_failed",
                 message="Download exception.",
-                error=err
+                error=error_text
             )
 
-            self.write_log(f"Download exception: {e}")
-            print(err)
+            self.write_log(
+                f"Download exception:\n"
+                f"{error_text}"
+            )
+
+            print(error_text)
 
     def handle_local_message(self, message):
         command = message.get("command")
@@ -348,6 +998,62 @@ class GrasshopperAgent:
         
         if command == "downloadable_outputs":
             return self.start_download_job(message)
+        
+        if command == "list_local_downloads":
+            session = message.get(
+                "session"
+            )
+
+            if not session:
+                return error_response(
+                    "Missing session."
+                )
+
+            output_index = int(
+                message.get(
+                    "output_index",
+                    1
+                )
+            )
+
+            file_types = message.get(
+                "file_types",
+                [
+                    "pointcloud",
+                    "image",
+                    "json"
+                ]
+            )
+
+            categories = message.get(
+                "categories",
+                message.get(
+                    "category",
+                    []
+                )
+            )
+
+            files = self.list_local_downloads(
+                session_name=session,
+                output_index=output_index,
+                file_types=file_types,
+                categories=categories
+            )
+
+            return ok_response(
+                message=(
+                    "Local session downloads listed."
+                ),
+                session=str(session),
+                output_index=output_index,
+                manifest_path=str(
+                    self.get_session_manifest_path(
+                        session,
+                        create_session_folder=False
+                    )
+                ),
+                files=files
+            )
 
         return error_response(f"Unknown GH Agent command: {command}")
 
