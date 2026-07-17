@@ -22,6 +22,8 @@ MERGED_OUTPUT_INDEX = 1
 MERGED_PCD_TEMPLATE = "merged{idx:02d}.ply"
 STITCHED_RGB_TEMPLATE = "stitched_rgb_{idx:02d}.png"
 STITCHED_HEIGHT_TEMPLATE = "stitched_height_{idx:02d}.png"
+EYE_TO_BASE_RGB_TEMPLATE = "eye_to_base_rgb_{idx:02d}.png"
+EYE_TO_BASE_HEIGHT_TEMPLATE = "eye_to_base_height_{idx:02d}.png"
 EYE_TO_BASE_PCD_TEMPLATE = "eye_to_base_point_cloud_{idx:02d}.ply"
 
 # ─────────────────────────────────────────────
@@ -409,6 +411,22 @@ class PointCloudMerger:
             self.merged_pcd_dir,
             EYE_TO_BASE_PCD_TEMPLATE.format(idx=idx)
         )
+    
+    def eye_to_base_rgb_path(self, idx=None):
+        if idx is None:
+            idx = self.output_index
+        return os.path.join(
+            self.merged_image_dir,
+            EYE_TO_BASE_RGB_TEMPLATE.format(idx=idx)
+        )
+    
+    def eye_to_base_height_path(self, idx=None):
+        if idx is None:
+            idx = self.output_index
+        return os.path.join(
+            self.merged_depth_dir,
+            EYE_TO_BASE_HEIGHT_TEMPLATE.format(idx=idx)
+        )
 
     # ---------- pipelines ----------
     def merge_ref_cam_pipeline(self):
@@ -551,6 +569,9 @@ class PointCloudMerger:
             pretransform_to_base=True
         )
 
+        # For eye-to-base, no ICP correction, so effective camera->base is just T_base_cam
+        self.T_eff[idx] = T_base_cam
+
         return pcd_base, T_base_cam
 
     def run(self, output_path):
@@ -612,11 +633,28 @@ class PointCloudMerger:
                 f"\nSaved eye-to-base transformed cloud "
                 f"(ROBOT BASE frame) → {eye_to_base_output_path}"
             )
+            
 
             self.show_timed_pointcloud(
                 [pcd_base],
                 window_name="Eye-to-Base Point Cloud"
             )
+
+            # Generate transformed RGB + height/depth map in ROBOT BASE frame
+            eye_to_base_rgb_path = self.eye_to_base_rgb_path()
+            eye_to_base_height_path = self.eye_to_base_height_path()
+
+            ok = self.stitch_rgbd_after_registration(
+                pcd_base,
+                eye_to_base_rgb_path,
+                eye_to_base_height_path
+            )
+
+            if ok:
+                print(f"\nSaved eye-to-base RGB/height map (BASE, 1mm/px) → {eye_to_base_rgb_path}")
+                print(f"Saved eye-to-base height Z_base (mm, uint16) → {eye_to_base_height_path}")
+            else:
+                print("[warn] eye-to-base RGB-D transform failed or skipped.")
 
         else:
             raise ValueError(f"Unknown frame_mode: {self.frame_mode}")

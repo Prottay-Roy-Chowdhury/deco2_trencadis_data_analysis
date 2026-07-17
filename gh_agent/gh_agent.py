@@ -46,6 +46,10 @@ class GrasshopperAgent:
         self.latest_error = None
         self.latest_log = []
         self.manifest_lock = threading.Lock()
+        # Local GH-Agent jobs, currently used for downloads.
+        # Python-side capture/transform/process jobs remain in the Python Agent.
+        self.local_jobs_lock = threading.Lock()
+        self.local_jobs = {}
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +160,16 @@ class GrasshopperAgent:
                     f"Job {job_id}: {job_status} - {job_message}"
                 )
 
-                if job_status in ("finished", "failed"):
-                    self.write_log(f"Job {job_id} completed with status: {job_status}")
+                if job_status in (
+                    "finished",
+                    "failed",
+                    "cancelled",
+                    "error"
+                ):
+                    self.write_log(
+                        f"Job {job_id} completed with status: "
+                        f"{job_status}"
+                    )
                     break
 
             except Exception as e:
@@ -184,7 +196,7 @@ class GrasshopperAgent:
             status="submitted",
             message=response.get("message", "Job submitted."),
             result=None,
-            error=None
+            clear_error=True
         )
 
         self.write_log(f"Submitted job {job_id}: {payload}")
@@ -196,6 +208,108 @@ class GrasshopperAgent:
             job_id=job_id,
             latest_status="submitted"
         )
+    
+
+    def create_local_job(
+        self,
+        job_id,
+        job_type,
+        status="queued",
+        progress=0,
+        message="",
+        result=None,
+        error=None
+    ):
+        """
+        Creates or replaces a locally managed GH-Agent job record.
+        """
+        now = datetime.now().isoformat(
+            timespec="seconds"
+        )
+
+        job = {
+            "job_id": str(job_id),
+            "job_type": str(job_type),
+            "status": str(status),
+            "progress": int(progress),
+            "message": str(message),
+            "result": result,
+            "error": error,
+            "created_at": now,
+            "updated_at": now
+        }
+
+        with self.local_jobs_lock:
+            self.local_jobs[str(job_id)] = job
+
+        return dict(job)
+
+
+    def update_local_job(
+        self,
+        job_id,
+        status=None,
+        progress=None,
+        message=None,
+        result=None,
+        error=None,
+        clear_error=False
+    ):
+        """
+        Updates one locally managed GH-Agent job.
+        """
+        job_key = str(job_id)
+
+        with self.local_jobs_lock:
+            if job_key not in self.local_jobs:
+                raise KeyError(
+                    f"Unknown local job ID: {job_key}"
+                )
+
+            job = self.local_jobs[job_key]
+
+            if status is not None:
+                job["status"] = str(status)
+
+            if progress is not None:
+                job["progress"] = int(progress)
+
+            if message is not None:
+                job["message"] = str(message)
+
+            if result is not None:
+                job["result"] = result
+
+            if clear_error:
+                job["error"] = None
+
+            elif error is not None:
+                job["error"] = error
+
+            job["updated_at"] = (
+                datetime.now().isoformat(
+                    timespec="seconds"
+                )
+            )
+
+            return dict(job)
+
+
+    def get_local_job(self, job_id):
+        """
+        Returns one local GH-Agent job record.
+        """
+        job_key = str(job_id)
+
+        with self.local_jobs_lock:
+            if job_key not in self.local_jobs:
+                raise KeyError(
+                    f"Unknown local job ID: {job_key}"
+                )
+
+            return dict(
+                self.local_jobs[job_key]
+            )
     
     def get_session_manifest_path(
         self,
@@ -764,34 +878,56 @@ class GrasshopperAgent:
         return files
 
     def start_download_job(self, message):
-        download_job_id = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        download_job_id = (
+            f"download-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+        )
 
-        self.set_latest(
+        local_job = self.create_local_job(
             job_id=download_job_id,
+            job_type="download",
             status="download_queued",
+            progress=0,
             message="Download job submitted.",
             result=None,
             error=None
         )
 
-        self.write_log(f"Download job submitted: {message}")
+        # Keep global latest status for the future workflow manager.
+        self.set_latest(
+            job_id=download_job_id,
+            status="download_queued",
+            message="Download job submitted.",
+            result=None,
+            clear_error=True
+        )
+
+        self.write_log(
+            f"Download job submitted: {message}"
+        )
 
         thread = threading.Thread(
             target=self._run_download_job,
-            args=(download_job_id, message),
+            args=(
+                download_job_id,
+                dict(message)
+            ),
             daemon=True
         )
+
         thread.start()
 
         return ok_response(
             message="Download job submitted to GH Agent.",
             job_id=download_job_id,
-            latest_status="download_queued"
+            latest_status="download_queued",
+            job=local_job
         )
     
     def _run_download_job(self, job_id, message):
         try:
             session = message.get("session")
+
             output_index = int(
                 message.get(
                     "output_index",
@@ -818,13 +954,23 @@ class GrasshopperAgent:
                 for file_type in requested_types
             ]
 
+            # ---------------------------------------------------------
+            # Start the local and global download states
+            # ---------------------------------------------------------
+
+            self.update_local_job(
+                job_id=job_id,
+                status="download_running",
+                progress=5,
+                message="Listing downloadable files.",
+                clear_error=True
+            )
+
             self.set_latest(
                 job_id=job_id,
                 status="download_running",
-                message=(
-                    f"Listing downloadable files: "
-                    f"{requested_types}"
-                )
+                message="Listing downloadable files.",
+                clear_error=True
             )
 
             self.write_log(
@@ -834,6 +980,10 @@ class GrasshopperAgent:
                 f"file_types={requested_types}"
             )
 
+            # ---------------------------------------------------------
+            # Ask the Python Agent which files are available
+            # ---------------------------------------------------------
+
             listing = self.python_client.send_command({
                 "command": "list_downloadable_outputs",
                 "session": session,
@@ -842,13 +992,23 @@ class GrasshopperAgent:
             })
 
             if listing.get("status") != "ok":
+                failure_message = listing.get(
+                    "message",
+                    "Failed to list downloadable outputs."
+                )
+
+                self.update_local_job(
+                    job_id=job_id,
+                    status="download_failed",
+                    progress=100,
+                    message=failure_message,
+                    error=listing
+                )
+
                 self.set_latest(
                     job_id=job_id,
                     status="download_failed",
-                    message=listing.get(
-                        "message",
-                        "Failed to list downloadable outputs."
-                    ),
+                    message=failure_message,
                     error=listing
                 )
 
@@ -856,9 +1016,11 @@ class GrasshopperAgent:
                     f"Download failed while listing files: "
                     f"{listing}"
                 )
+
                 return
 
             saved = []
+
             files = listing.get(
                 "files",
                 {}
@@ -870,6 +1032,10 @@ class GrasshopperAgent:
             )
 
             count = 0
+
+            # ---------------------------------------------------------
+            # Download every returned file
+            # ---------------------------------------------------------
 
             for category, items in files.items():
                 for item in items:
@@ -885,14 +1051,30 @@ class GrasshopperAgent:
                         / name
                     )
 
+                    if total > 0:
+                        progress = 10 + int(
+                            80.0 * count / total
+                        )
+                    else:
+                        progress = 90
+
+                    download_message = (
+                        f"Downloading "
+                        f"{count}/{total}: "
+                        f"{name}"
+                    )
+
+                    self.update_local_job(
+                        job_id=job_id,
+                        status="download_running",
+                        progress=progress,
+                        message=download_message
+                    )
+
                     self.set_latest(
                         job_id=job_id,
                         status="download_running",
-                        message=(
-                            f"Downloading "
-                            f"{count}/{total}: "
-                            f"{name}"
-                        )
+                        message=download_message
                     )
 
                     self.write_log(
@@ -915,6 +1097,10 @@ class GrasshopperAgent:
                         "result": result
                     })
 
+            # ---------------------------------------------------------
+            # Update the persistent per-session manifest
+            # ---------------------------------------------------------
+
             # This stays outside both download loops.
             self.update_session_manifest_from_downloads(
                 session_name=listing["session"],
@@ -926,21 +1112,38 @@ class GrasshopperAgent:
                 listing["session"]
             )
 
+            final_result = {
+                "session": listing["session"],
+                "output_index": output_index,
+                "saved": saved,
+                "manifest_path": str(
+                    manifest_path
+                )
+            }
+
+            finished_message = (
+                f"Downloaded {len(saved)} file(s) "
+                f"and updated the session manifest."
+            )
+
+            # ---------------------------------------------------------
+            # Finish both the local job and global latest state
+            # ---------------------------------------------------------
+
+            self.update_local_job(
+                job_id=job_id,
+                status="download_finished",
+                progress=100,
+                message=finished_message,
+                result=final_result,
+                clear_error=True
+            )
+
             self.set_latest(
                 job_id=job_id,
                 status="download_finished",
-                message=(
-                    f"Downloaded {len(saved)} file(s) "
-                    f"and updated the session manifest."
-                ),
-                result={
-                    "session": listing["session"],
-                    "output_index": output_index,
-                    "saved": saved,
-                    "manifest_path": str(
-                        manifest_path
-                    )
-                },
+                message=finished_message,
+                result=final_result,
                 clear_error=True
             )
 
@@ -952,6 +1155,18 @@ class GrasshopperAgent:
 
         except Exception:
             error_text = traceback.format_exc()
+
+            # Update the local download job if it was already created.
+            try:
+                self.update_local_job(
+                    job_id=job_id,
+                    status="download_failed",
+                    progress=100,
+                    message="Download exception.",
+                    error=error_text
+                )
+            except KeyError:
+                pass
 
             self.set_latest(
                 job_id=job_id,
@@ -984,6 +1199,44 @@ class GrasshopperAgent:
                     "command": "ping"
                 }
             )
+        if command == "get_job_status":
+            job_id = message.get(
+                "job_id"
+            )
+
+            if not job_id:
+                return error_response(
+                    "Missing job_id."
+                )
+
+            job_id = str(job_id)
+
+            # Download jobs are managed locally by the GH Agent.
+            if job_id.startswith("download-"):
+                try:
+                    local_job = self.get_local_job(
+                        job_id
+                    )
+
+                    return ok_response(
+                        message="Local job status returned.",
+                        job=local_job
+                    )
+
+                except KeyError as exc:
+                    return error_response(
+                        str(exc)
+                    )
+
+            # Capture, transform and process jobs belong to the Python Agent.
+            python_response = (
+                self.python_client.send_command({
+                    "command": "get_status",
+                    "job_id": job_id
+                })
+            )
+
+            return python_response
 
         if command == "get_latest_status":
             return self.get_latest_status()

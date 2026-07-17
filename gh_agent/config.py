@@ -1,6 +1,6 @@
 from pathlib import Path
 
-PYTHON_AGENT_HOST = "192.168.56.1"   # Python PC IP: 192.168.56.1 # Localhost: 127.0.0.1
+PYTHON_AGENT_HOST = "127.0.0.1"   # Python PC IP: 192.168.56.1 # Localhost: 127.0.0.1
 PYTHON_AGENT_PORT = 5005
 PYTHON_AGENT_FILE_PORT = 5006
 
