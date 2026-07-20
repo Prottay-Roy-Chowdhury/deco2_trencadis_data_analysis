@@ -1,7 +1,9 @@
 import os
 import threading
 from typing import Dict, Any
+from pathlib import Path
 from helpers.session_manager import load_session
+from workflow.bootstrap import build_default_workflow_manager
 
 from agent.protocol import ok_response, error_response
 from agent.job_manager import JobManager
@@ -10,7 +12,20 @@ from agent.job_manager import JobManager
 
 class CommandHandler:
     def __init__(self):
+        # Manual job system.
         self.jobs = JobManager()
+
+        # Workflow system.
+        python_root = Path(__file__).resolve().parents[1]
+        project_root = python_root.parent
+
+        sessions_root = project_root / "sessions"
+        definitions_root = python_root / "workflow_definitions"
+
+        self.workflows = build_default_workflow_manager(
+            sessions_root=sessions_root,
+            definitions_root=definitions_root,
+        )
 
     def handle(self, message: Dict[str, Any]) -> Dict[str, Any]:
         command = message.get("command")
@@ -41,6 +56,19 @@ class CommandHandler:
         
         if command == "list_downloadable_outputs":
             return self.handle_list_downloadable_outputs(message)
+        
+        # Workflow commands.
+        if command == "submit_workflow":
+            return self.handle_submit_workflow(message)
+
+        if command == "get_workflow_status":
+            return self.handle_get_workflow_status(message)
+
+        if command == "cancel_workflow":
+            return self.handle_cancel_workflow(message)
+
+        if command == "list_workflows":
+            return self.handle_list_workflows(message)
 
         return error_response(f"Unknown command: {command}")
 
@@ -61,6 +89,120 @@ class CommandHandler:
 
     def handle_list_jobs(self):
         return ok_response(jobs=self.jobs.list_jobs())
+    
+    # for Workflow manager
+    def handle_submit_workflow(self, message):
+        workflow_name = message.get("workflow_name")
+        session = message.get("session")
+
+        if not workflow_name:
+            return error_response("Missing workflow_name.")
+
+        if not session:
+            return error_response("Missing session.")
+
+        stage_configs = message.get("stage_configs", {})
+        selected_stages = message.get("selected_stages")
+        start_stage = message.get("start_stage")
+        runtime = message.get("runtime", {})
+
+        if not isinstance(stage_configs, dict):
+            return error_response("stage_configs must be an object.")
+
+        if not isinstance(runtime, dict):
+            return error_response("runtime must be an object.")
+
+        try:
+            workflow = self.workflows.submit_workflow(
+                workflow_name=workflow_name,
+                session=session,
+                stage_configs=stage_configs,
+                selected_stages=selected_stages,
+                start_stage=start_stage,
+                runtime=runtime,
+            )
+
+            return ok_response(
+                workflow_id=workflow["workflow_id"],
+                message="Workflow submitted.",
+                workflow=workflow,
+            )
+
+        except Exception as e:
+            return error_response(
+                message=f"Could not submit workflow: {e}"
+            )
+
+
+    def handle_get_workflow_status(self, message):
+        workflow_id = message.get("workflow_id")
+        session = message.get("session")
+
+        if not workflow_id:
+            return error_response("Missing workflow_id.")
+
+        try:
+            workflow = self.workflows.get_workflow_status(
+                workflow_id=workflow_id,
+                session=session,
+            )
+
+            return ok_response(
+                workflow_id=workflow_id,
+                workflow=workflow,
+            )
+
+        except Exception as e:
+            return error_response(
+                message=f"Could not get workflow status: {e}"
+            )
+
+
+    def handle_cancel_workflow(self, message):
+        workflow_id = message.get("workflow_id")
+        session = message.get("session")
+
+        if not workflow_id:
+            return error_response("Missing workflow_id.")
+
+        try:
+            workflow = self.workflows.cancel_workflow(
+                workflow_id=workflow_id,
+                session=session,
+            )
+
+            return ok_response(
+                workflow_id=workflow_id,
+                message="Workflow cancellation requested.",
+                workflow=workflow,
+            )
+
+        except Exception as e:
+            return error_response(
+                message=f"Could not cancel workflow: {e}"
+            )
+
+
+    def handle_list_workflows(self, message):
+        session = message.get("session")
+
+        if not session:
+            return error_response("Missing session.")
+
+        try:
+            workflows = self.workflows.list_workflows(
+                session=session,
+            )
+
+            return ok_response(
+                session=session,
+                workflows=workflows,
+            )
+
+        except Exception as e:
+            return error_response(
+                message=f"Could not list workflows: {e}"
+            )
 
     # def handle_get_file_metadata(self, message):
     #     path = message.get("path")
