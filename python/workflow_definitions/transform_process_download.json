@@ -1,0 +1,24 @@
+{
+  "name": "transform_process_download",
+  "version": 1,
+  "stages": [
+    {
+      "id": "transform",
+      "executor": "transform",
+      "depends_on": [],
+      "max_retries": 0
+    },
+    {
+      "id": "process",
+      "executor": "process",
+      "depends_on": ["transform"],
+      "max_retries": 0
+    },
+    {
+      "id": "download",
+      "executor": "download",
+      "depends_on": ["process"],
+      "max_retries": 0
+    }
+  ]
+}
