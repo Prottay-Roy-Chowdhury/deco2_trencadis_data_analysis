@@ -119,6 +119,14 @@ class GrasshopperAgent:
             daemon=True
         )
         thread.start()
+    
+    def start_polling_workflow(self, workflow_id, session):
+        thread = threading.Thread(
+            target=self.poll_workflow_until_done,
+            args=(workflow_id, session),
+            daemon=True,
+        )
+        thread.start()
 
     def poll_workflow_until_done(self, workflow_id, session):
         self.write_log(f"Started polling workflow: {workflow_id}")
