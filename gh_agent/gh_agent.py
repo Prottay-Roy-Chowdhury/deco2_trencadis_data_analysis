@@ -120,6 +120,92 @@ class GrasshopperAgent:
         )
         thread.start()
 
+    def poll_workflow_until_done(self, workflow_id, session):
+        self.write_log(f"Started polling workflow: {workflow_id}")
+
+        while self.running:
+            try:
+                response = self.python_client.send_command({
+                    "command": "get_workflow_status",
+                    "workflow_id": workflow_id,
+                    "session": session,
+                })
+
+                if response.get("status") != "ok":
+                    message = response.get(
+                        "message",
+                        "Failed to get workflow status.",
+                    )
+
+                    self.set_latest(
+                        job_id=workflow_id,
+                        status="unknown",
+                        message=message,
+                        error=message,
+                    )
+
+                    self.write_log(message)
+                    time.sleep(POLL_INTERVAL_SEC)
+                    continue
+
+                workflow = response.get("workflow", {})
+                workflow_status = workflow.get("status", "unknown")
+                current_stage = workflow.get("current_stage")
+                progress = workflow.get("progress", 0)
+                workflow_error = workflow.get("error")
+
+                if current_stage:
+                    message = (
+                        f"Workflow {workflow_status}: "
+                        f"{current_stage} ({progress}%)."
+                    )
+                else:
+                    message = (
+                        f"Workflow {workflow_status} "
+                        f"({progress}%)."
+                    )
+
+                self.set_latest(
+                    job_id=workflow_id,
+                    status=workflow_status,
+                    message=message,
+                    result=workflow,
+                    error=workflow_error,
+                    clear_error=not workflow_error,
+                )
+
+                self.write_log(
+                    f"Workflow {workflow_id}: "
+                    f"{workflow_status} - {message}"
+                )
+
+                if workflow_status in {
+                    "finished",
+                    "failed",
+                    "cancelled",
+                    "error",
+                }:
+                    self.write_log(
+                        f"Workflow {workflow_id} completed "
+                        f"with status: {workflow_status}"
+                    )
+                    break
+
+            except Exception as exc:
+                self.set_latest(
+                    job_id=workflow_id,
+                    status="error",
+                    message=str(exc),
+                    error=str(exc),
+                )
+
+                self.write_log(
+                    f"Workflow polling error for "
+                    f"{workflow_id}: {exc}"
+                )
+
+            time.sleep(POLL_INTERVAL_SEC)
+
     def poll_job_until_done(self, job_id):
         self.write_log(f"Started polling job: {job_id}")
 
@@ -207,6 +293,49 @@ class GrasshopperAgent:
             message="Job submitted to Python Agent.",
             job_id=job_id,
             latest_status="submitted"
+        )
+    
+
+    def submit_python_workflow(self, payload):
+        response = self.python_client.send_command(payload)
+
+        if response.get("status") != "ok":
+            return response
+
+        workflow_id = response.get("workflow_id")
+        session = payload.get("session")
+
+        if not workflow_id:
+            return error_response(
+                "Python Agent did not return a workflow_id."
+            )
+
+        self.set_latest(
+            job_id=workflow_id,
+            status="submitted",
+            message=response.get(
+                "message",
+                "Workflow submitted.",
+            ),
+            result=response.get("workflow"),
+            clear_error=True,
+        )
+
+        self.write_log(
+            f"Submitted workflow {workflow_id}: {payload}"
+        )
+
+        self.start_polling_workflow(
+            workflow_id=workflow_id,
+            session=session,
+        )
+
+        return ok_response(
+            message="Workflow submitted to Python Agent.",
+            workflow_id=workflow_id,
+            session=session,
+            latest_status="submitted",
+            workflow=response.get("workflow"),
         )
     
 
@@ -1307,6 +1436,69 @@ class GrasshopperAgent:
                 ),
                 files=files
             )
+        
+        if command == "submit_workflow":
+            payload = message.get("payload")
+
+            if payload is None:
+                payload = {
+                    key: value
+                    for key, value in message.items()
+                    if key != "command"
+                }
+
+            if not isinstance(payload, dict):
+                return error_response(
+                    "Missing or invalid workflow payload."
+                )
+
+            payload = dict(payload)
+            payload["command"] = "submit_workflow"
+
+            return self.submit_python_workflow(payload)
+        
+        if command == "get_workflow_status":
+            workflow_id = message.get("workflow_id")
+
+            if not workflow_id:
+                return error_response("Missing workflow_id.")
+
+            payload = {
+                "command": "get_workflow_status",
+                "workflow_id": workflow_id,
+            }
+
+            if message.get("session"):
+                payload["session"] = message["session"]
+
+            return self.python_client.send_command(payload)
+        
+        if command == "cancel_workflow":
+            workflow_id = message.get("workflow_id")
+
+            if not workflow_id:
+                return error_response("Missing workflow_id.")
+
+            payload = {
+                "command": "cancel_workflow",
+                "workflow_id": workflow_id,
+            }
+
+            if message.get("session"):
+                payload["session"] = message["session"]
+
+            return self.python_client.send_command(payload)
+        
+        if command == "list_workflows":
+            session = message.get("session")
+
+            if not session:
+                return error_response("Missing session.")
+
+            return self.python_client.send_command({
+                "command": "list_workflows",
+                "session": session,
+            })
 
         return error_response(f"Unknown GH Agent command: {command}")
 
