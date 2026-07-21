@@ -1319,6 +1319,311 @@ class GrasshopperAgent:
 
             print(error_text)
 
+    
+    def start_design_upload_job(self, message):
+        upload_job_id = (
+            f"design-upload-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+        )
+
+        local_job = self.create_local_job(
+            job_id=upload_job_id,
+            job_type="design_upload",
+            status="upload_queued",
+            progress=0,
+            message="Design upload job submitted.",
+            result=None,
+            error=None,
+        )
+
+        self.set_latest(
+            job_id=upload_job_id,
+            status="upload_queued",
+            message="Design upload job submitted.",
+            result=None,
+            clear_error=True,
+        )
+
+        self.write_log(
+            f"Design upload job submitted: {message}"
+        )
+
+        thread = threading.Thread(
+            target=self._run_design_upload_job,
+            args=(
+                upload_job_id,
+                dict(message),
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+        return ok_response(
+            message="Design upload job submitted to GH Agent.",
+            job_id=upload_job_id,
+            latest_status="upload_queued",
+            job=local_job,
+        )
+    
+
+    def _run_design_upload_job(
+        self,
+        job_id,
+        message,
+    ):
+        try:
+            session = str(
+                message.get("session") or ""
+            ).strip()
+
+            if not session:
+                raise ValueError("Missing session.")
+
+            try:
+                design_output_index = int(
+                    message.get("design_output_index")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "design_output_index must be an integer."
+                ) from exc
+
+            if design_output_index < 1:
+                raise ValueError(
+                    "design_output_index must be at least 1."
+                )
+
+            source_processing_output_index = (
+                message.get(
+                    "source_processing_output_index"
+                )
+            )
+
+            if source_processing_output_index is not None:
+                try:
+                    source_processing_output_index = int(
+                        source_processing_output_index
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "source_processing_output_index "
+                        "must be an integer."
+                    ) from exc
+
+                if source_processing_output_index < 1:
+                    raise ValueError(
+                        "source_processing_output_index "
+                        "must be at least 1."
+                    )
+
+            files = message.get("files")
+
+            if not isinstance(files, list) or not files:
+                raise ValueError(
+                    "files must be a non-empty array."
+                )
+
+            prepared_files = []
+
+            for index, file_record in enumerate(files):
+                if not isinstance(file_record, dict):
+                    raise ValueError(
+                        f"files[{index}] must be an object."
+                    )
+
+                local_path = Path(
+                    file_record.get("path") or ""
+                ).expanduser()
+
+                category = str(
+                    file_record.get("category") or ""
+                ).strip()
+
+                if not local_path.is_file():
+                    raise FileNotFoundError(
+                        f"Design file does not exist: "
+                        f"{local_path}"
+                    )
+
+                if not category:
+                    raise ValueError(
+                        f"files[{index}] is missing category."
+                    )
+
+                prepared_files.append(
+                    {
+                        "path": str(
+                            local_path.resolve()
+                        ),
+                        "category": category,
+                    }
+                )
+
+            created_by = str(
+                message.get("created_by")
+                or "design_pc"
+            ).strip()
+
+            upload_message = str(
+                message.get("message") or ""
+            )
+
+            self.update_local_job(
+                job_id=job_id,
+                status="upload_running",
+                progress=10,
+                message=(
+                    "Validated design files. "
+                    "Connecting to Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_running",
+                message=(
+                    "Validated design files. "
+                    "Connecting to Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.write_log(
+                "Design upload running: "
+                f"session={session}, "
+                f"design_output_index="
+                f"{design_output_index}, "
+                f"file_count={len(prepared_files)}"
+            )
+
+            self.update_local_job(
+                job_id=job_id,
+                status="upload_running",
+                progress=25,
+                message=(
+                    f"Uploading {len(prepared_files)} "
+                    "design file(s)."
+                ),
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_running",
+                message=(
+                    f"Uploading {len(prepared_files)} "
+                    "design file(s)."
+                ),
+            )
+
+            result = self.python_client.upload_design_output(
+                session=session,
+                design_output_index=design_output_index,
+                files=prepared_files,
+                source_processing_output_index=(
+                    source_processing_output_index
+                ),
+                created_by=created_by,
+                message=upload_message,
+            )
+
+            if result.get("status") != "ok":
+                failure_message = result.get(
+                    "message",
+                    "Design upload failed.",
+                )
+
+                self.update_local_job(
+                    job_id=job_id,
+                    status="upload_failed",
+                    progress=100,
+                    message=failure_message,
+                    result=result,
+                    error=result,
+                )
+
+                self.set_latest(
+                    job_id=job_id,
+                    status="upload_failed",
+                    message=failure_message,
+                    result=result,
+                    error=result,
+                )
+
+                self.write_log(
+                    "Design upload failed: "
+                    f"{result}"
+                )
+
+                return
+
+            finished_message = (
+                "Design output uploaded successfully: "
+                f"session={session}, "
+                f"design_output_index="
+                f"{design_output_index}."
+            )
+
+            final_result = {
+                "session": session,
+                "design_output_index": (
+                    design_output_index
+                ),
+                "source_processing_output_index": (
+                    source_processing_output_index
+                ),
+                "uploaded_files": prepared_files,
+                "master_response": result,
+            }
+
+            self.update_local_job(
+                job_id=job_id,
+                status="upload_finished",
+                progress=100,
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_finished",
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.write_log(finished_message)
+
+        except Exception:
+            error_text = traceback.format_exc()
+
+            try:
+                self.update_local_job(
+                    job_id=job_id,
+                    status="upload_failed",
+                    progress=100,
+                    message="Design upload exception.",
+                    error=error_text,
+                )
+            except KeyError:
+                pass
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_failed",
+                message="Design upload exception.",
+                error=error_text,
+            )
+
+            self.write_log(
+                "Design upload exception:\n"
+                f"{error_text}"
+            )
+
+            print(error_text)
+    
+
     def handle_local_message(self, message):
         command = message.get("command")
 
@@ -1348,22 +1653,20 @@ class GrasshopperAgent:
 
             job_id = str(job_id)
 
-            # Download jobs are managed locally by the GH Agent.
-            if job_id.startswith("download-"):
+            # Download & Upload jobs are managed locally by the GH Agent.
+            if (
+                job_id.startswith("download-")
+                or job_id.startswith("design-upload-")
+            ):
                 try:
-                    local_job = self.get_local_job(
-                        job_id
-                    )
+                    local_job = self.get_local_job(job_id)
 
                     return ok_response(
                         message="Local job status returned.",
-                        job=local_job
+                        job=local_job,
                     )
-
                 except KeyError as exc:
-                    return error_response(
-                        str(exc)
-                    )
+                    return error_response(str(exc))
 
             # Capture, transform and process jobs belong to the Python Agent.
             python_response = (
@@ -1388,6 +1691,9 @@ class GrasshopperAgent:
         
         if command == "downloadable_outputs":
             return self.start_download_job(message)
+        
+        if command == "upload_design_output":
+            return self.start_design_upload_job(message)
         
         if command == "list_local_downloads":
             session = message.get(
