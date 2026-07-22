@@ -295,6 +295,90 @@ class LocalUploadStore:
 
         return dict(record)
 
+    def update_files_status(
+        self,
+        session: str,
+        filenames: list[str],
+        upload_status: str,
+        master_files: dict[str, str] | None = None,
+        error: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Updates several local upload-manifest entries atomically.
+
+        master_files maps the original local filename to the filename
+        assigned by the Python master.
+        """
+        if not isinstance(filenames, list) or not filenames:
+            raise ValueError(
+                "filenames must be a non-empty list."
+            )
+
+        requested_names = {
+            str(filename).strip().lower()
+            for filename in filenames
+            if str(filename).strip()
+        }
+
+        if not requested_names:
+            raise ValueError(
+                "filenames must contain at least one valid name."
+            )
+
+        master_files = master_files or {}
+        normalized_master_files = {
+            str(key).strip().lower(): str(value)
+            for key, value in master_files.items()
+        }
+
+        manifest = self.load_manifest(session)
+        updated_records: list[dict[str, Any]] = []
+        now = self._now()
+
+        for record in manifest.get("files", []):
+            filename = str(
+                record.get("filename", "")
+            ).strip()
+
+            if filename.lower() not in requested_names:
+                continue
+
+            record["upload_status"] = str(upload_status)
+            record["updated_at"] = now
+            record["error"] = error
+
+            master_filename = normalized_master_files.get(
+                filename.lower()
+            )
+
+            if master_filename:
+                record["master_filename"] = master_filename
+
+            if upload_status == "uploaded":
+                record["uploaded_at"] = now
+
+            updated_records.append(dict(record))
+
+        found_names = {
+            str(record.get("filename", "")).lower()
+            for record in updated_records
+        }
+
+        missing_names = requested_names - found_names
+
+        if missing_names:
+            raise FileNotFoundError(
+                "Upload manifest entries were not found: "
+                + ", ".join(sorted(missing_names))
+            )
+
+        self.save_manifest(
+            session=session,
+            manifest=manifest,
+        )
+
+        return updated_records
+
     def list_files(
         self,
         session: str,

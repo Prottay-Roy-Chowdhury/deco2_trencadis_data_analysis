@@ -1360,6 +1360,49 @@ class GrasshopperAgent:
             "manifest_path": str(manifest_path.resolve()),
         }
 
+    def get_registered_design_upload_files(
+        self,
+        session,
+        design_output_index,
+        upload_status=None,
+    ):
+        records = self.local_upload_store.list_files(
+            session=session,
+            domain="design",
+            design_output_index=design_output_index,
+            upload_status=upload_status,
+        )
+
+        prepared_files = []
+
+        for record in records:
+            if not record.get("exists", False):
+                continue
+
+            local_path = Path(
+                record.get("local_path", "")
+            )
+
+            if not local_path.is_file():
+                continue
+
+            category = str(
+                record.get("category") or ""
+            ).strip()
+
+            if not category:
+                continue
+
+            prepared_files.append(
+                {
+                    "path": str(local_path.resolve()),
+                    "category": category,
+                    "filename": local_path.name,
+                }
+            )
+
+        return prepared_files
+
     
     def start_design_upload_job(self, message):
         upload_job_id = (
@@ -1412,6 +1455,10 @@ class GrasshopperAgent:
         job_id,
         message,
     ):
+
+        registered_filenames = []
+        session = ""
+        
         try:
             session = str(
                 message.get("session") or ""
@@ -1458,11 +1505,67 @@ class GrasshopperAgent:
                     )
 
             files = message.get("files")
+            prepared_files = []
 
-            if not isinstance(files, list) or not files:
-                raise ValueError(
-                    "files must be a non-empty array."
+            # ---------------------------------------------------------
+            # Explicit file mode
+            # Preserves the existing upload API.
+            # ---------------------------------------------------------
+
+            if isinstance(files, list) and files:
+                for index, file_record in enumerate(files):
+                    if not isinstance(file_record, dict):
+                        raise ValueError(
+                            f"files[{index}] must be an object."
+                        )
+
+                    local_path = Path(
+                        file_record.get("path") or ""
+                    ).expanduser()
+
+                    category = str(
+                        file_record.get("category") or ""
+                    ).strip()
+
+                    if not local_path.is_file():
+                        raise FileNotFoundError(
+                            f"Design file does not exist: "
+                            f"{local_path}"
+                        )
+
+                    if not category:
+                        raise ValueError(
+                            f"files[{index}] is missing category."
+                        )
+
+                    prepared_files.append(
+                        {
+                            "path": str(local_path.resolve()),
+                            "category": category,
+                            "filename": local_path.name,
+                        }
+                    )
+
+            # ---------------------------------------------------------
+            # Registered local-manifest mode
+            # ---------------------------------------------------------
+
+            else:
+                prepared_files = (
+                    self.get_registered_design_upload_files(
+                        session=session,
+                        design_output_index=design_output_index,
+                        upload_status="pending",
+                    )
                 )
+
+                if not prepared_files:
+                    raise FileNotFoundError(
+                        "No pending registered design files were found "
+                        f"for session={session}, "
+                        "design_output_index="
+                        f"{design_output_index}."
+                    )
 
             prepared_files = []
 
@@ -1499,6 +1602,18 @@ class GrasshopperAgent:
                         "category": category,
                     }
                 )
+
+            registered_filenames = [
+                item["filename"]
+                for item in prepared_files
+            ]
+
+            self.local_upload_store.update_files_status(
+                session=session,
+                filenames=registered_filenames,
+                upload_status="uploading",
+                error=None,
+            )
 
             created_by = str(
                 message.get("created_by")
@@ -1574,6 +1689,13 @@ class GrasshopperAgent:
                     "Design upload failed.",
                 )
 
+                self.local_upload_store.update_files_status(
+                    session=session,
+                    filenames=registered_filenames,
+                    upload_status="failed",
+                    error=failure_message,
+                )
+
                 self.update_local_job(
                     job_id=job_id,
                     status="upload_failed",
@@ -1598,6 +1720,34 @@ class GrasshopperAgent:
 
                 return
 
+            master_file_mapping = {}
+
+            master_output = result.get("output", {})
+
+            for file_record in master_output.get("files", []):
+                original_filename = str(
+                    file_record.get("original_filename") or ""
+                ).strip()
+
+                master_filename = str(
+                    file_record.get("filename") or ""
+                ).strip()
+
+                if original_filename and master_filename:
+                    master_file_mapping[
+                        original_filename
+                    ] = master_filename
+
+            updated_local_records = (
+                self.local_upload_store.update_files_status(
+                    session=session,
+                    filenames=registered_filenames,
+                    upload_status="uploaded",
+                    master_files=master_file_mapping,
+                    error=None,
+                )
+            )
+
             finished_message = (
                 "Design output uploaded successfully: "
                 f"session={session}, "
@@ -1607,13 +1757,12 @@ class GrasshopperAgent:
 
             final_result = {
                 "session": session,
-                "design_output_index": (
-                    design_output_index
-                ),
+                "design_output_index": design_output_index,
                 "source_processing_output_index": (
                     source_processing_output_index
                 ),
                 "uploaded_files": prepared_files,
+                "local_manifest_files": updated_local_records,
                 "master_response": result,
             }
 
@@ -1663,6 +1812,20 @@ class GrasshopperAgent:
             )
 
             print(error_text)
+
+        if session and registered_filenames:
+            try:
+                self.local_upload_store.update_files_status(
+                    session=session,
+                    filenames=registered_filenames,
+                    upload_status="failed",
+                    error=error_text,
+                )
+            except Exception as manifest_exc:
+                self.write_log(
+                    "Could not update local upload manifest "
+                    f"after failure: {manifest_exc}"
+                )
     
 
     def handle_local_message(self, message):
