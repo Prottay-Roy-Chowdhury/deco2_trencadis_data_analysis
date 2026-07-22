@@ -6,6 +6,8 @@
 
 **/DATA_RECEIVED/
 
+**/DATA_UPLOAD/
+
 **/GH_AGENT_RECEIVED/
 
 *.pcd
