@@ -67,135 +67,135 @@ class PythonAgentClient:
                 "received": received
             }
         
-        def upload_design_output(
-            self,
-            session,
-            design_output_index,
-            files,
-            source_processing_output_index=None,
-            created_by="design_pc",
-            message="",
-        ):
-            """
-            Uploads local design files to the Python master.
-
-            files format:
-
-                [
-                    {
-                        "path": "C:/.../solution.ghdata",
-                        "category": "geometry",
-                    },
-                    {
-                        "path": "C:/.../parameters.json",
-                        "category": "parameters",
-                    },
-                ]
-            """
-            if not session:
-                raise ValueError("Session cannot be empty.")
-
-            try:
-                design_index = int(design_output_index)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "design_output_index must be an integer."
-                ) from exc
-
-            if design_index < 1:
-                raise ValueError(
-                    "design_output_index must be at least 1."
-                )
-
-            if not isinstance(files, list) or not files:
-                raise ValueError(
-                    "files must be a non-empty list."
-                )
-
-            prepared_files = []
-
-            for index, file_record in enumerate(files):
-                if not isinstance(file_record, dict):
+    def upload_design_output(
+                self,
+                session,
+                design_output_index,
+                files,
+                source_processing_output_index=None,
+                created_by="design_pc",
+                message="",
+            ):
+                """
+                Uploads local design files to the Python master.
+    
+                files format:
+    
+                    [
+                        {
+                            "path": "C:/.../solution.ghdata",
+                            "category": "geometry",
+                        },
+                        {
+                            "path": "C:/.../parameters.json",
+                            "category": "parameters",
+                        },
+                    ]
+                """
+                if not session:
+                    raise ValueError("Session cannot be empty.")
+    
+                try:
+                    design_index = int(design_output_index)
+                except (TypeError, ValueError) as exc:
                     raise ValueError(
-                        f"files[{index}] must be an object."
-                    )
-
-                local_path = Path(
-                    file_record.get("path") or ""
-                )
-
-                category = str(
-                    file_record.get("category") or ""
-                ).strip()
-
-                if not local_path.is_file():
-                    raise FileNotFoundError(
-                        f"Design file does not exist: {local_path}"
-                    )
-
-                if not category:
+                        "design_output_index must be an integer."
+                    ) from exc
+    
+                if design_index < 1:
                     raise ValueError(
-                        f"files[{index}] is missing category."
+                        "design_output_index must be at least 1."
                     )
-
-                prepared_files.append(
-                    {
-                        "path": local_path,
-                        "name": local_path.name,
-                        "category": category,
-                        "size": local_path.stat().st_size,
-                    }
-                )
-
-            request = {
-                "command": "upload_design_output",
-                "session": str(session).strip(),
-                "design_output_index": design_index,
-                "created_by": str(created_by or "design_pc"),
-                "message": str(message or ""),
-                "files": [
-                    {
-                        "name": item["name"],
-                        "category": item["category"],
-                        "size": item["size"],
-                    }
-                    for item in prepared_files
-                ],
-            }
-
-            if source_processing_output_index is not None:
-                request["source_processing_output_index"] = int(
-                    source_processing_output_index
-                )
-
-            with socket.socket(
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-            ) as sock:
-                sock.connect(
-                    (
-                        self.host,
-                        PYTHON_AGENT_UPLOAD_PORT,
+    
+                if not isinstance(files, list) or not files:
+                    raise ValueError(
+                        "files must be a non-empty list."
                     )
-                )
-
-                send_message(sock, request)
-
-                ready_response = receive_message(sock)
-
-                if ready_response.get("status") != "ok":
-                    return ready_response
-
-                for item in prepared_files:
-                    with item["path"].open("rb") as file:
-                        while True:
-                            chunk = file.read(FILE_CHUNK_SIZE)
-
-                            if not chunk:
-                                break
-
-                            sock.sendall(chunk)
-
-                completion_response = receive_message(sock)
-
-                return completion_response
+    
+                prepared_files = []
+    
+                for index, file_record in enumerate(files):
+                    if not isinstance(file_record, dict):
+                        raise ValueError(
+                            f"files[{index}] must be an object."
+                        )
+    
+                    local_path = Path(
+                        file_record.get("path") or ""
+                    )
+    
+                    category = str(
+                        file_record.get("category") or ""
+                    ).strip()
+    
+                    if not local_path.is_file():
+                        raise FileNotFoundError(
+                            f"Design file does not exist: {local_path}"
+                        )
+    
+                    if not category:
+                        raise ValueError(
+                            f"files[{index}] is missing category."
+                        )
+    
+                    prepared_files.append(
+                        {
+                            "path": local_path,
+                            "name": local_path.name,
+                            "category": category,
+                            "size": local_path.stat().st_size,
+                        }
+                    )
+    
+                request = {
+                    "command": "upload_design_output",
+                    "session": str(session).strip(),
+                    "design_output_index": design_index,
+                    "created_by": str(created_by or "design_pc"),
+                    "message": str(message or ""),
+                    "files": [
+                        {
+                            "name": item["name"],
+                            "category": item["category"],
+                            "size": item["size"],
+                        }
+                        for item in prepared_files
+                    ],
+                }
+    
+                if source_processing_output_index is not None:
+                    request["source_processing_output_index"] = int(
+                        source_processing_output_index
+                    )
+    
+                with socket.socket(
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                ) as sock:
+                    sock.connect(
+                        (
+                            self.host,
+                            PYTHON_AGENT_UPLOAD_PORT,
+                        )
+                    )
+    
+                    send_message(sock, request)
+    
+                    ready_response = receive_message(sock)
+    
+                    if ready_response.get("status") != "ok":
+                        return ready_response
+    
+                    for item in prepared_files:
+                        with item["path"].open("rb") as file:
+                            while True:
+                                chunk = file.read(FILE_CHUNK_SIZE)
+    
+                                if not chunk:
+                                    break
+    
+                                sock.sendall(chunk)
+    
+                    completion_response = receive_message(sock)
+    
+                    return completion_response
