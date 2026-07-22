@@ -25,6 +25,7 @@ from gh_agent.protocol import (
 )
 
 from gh_agent.python_agent_client import PythonAgentClient
+from gh_agent.local_upload_store import LocalUploadStore
 
 
 class GrasshopperAgent:
@@ -35,6 +36,7 @@ class GrasshopperAgent:
         self.host = host
         self.port = port
         self.python_client = PythonAgentClient()
+        self.local_upload_store = LocalUploadStore()
         self.running = False
 
         self.lock = threading.Lock()
@@ -1319,6 +1321,45 @@ class GrasshopperAgent:
 
             print(error_text)
 
+    def get_upload_session_info(
+        self,
+        session,
+    ):
+        """
+        Creates the local upload session folder and manifest on demand,
+        then returns their paths.
+        """
+        session_name = str(session or "").strip()
+
+        if not session_name:
+            raise ValueError("Missing session.")
+
+        session_folder = (
+            self.local_upload_store.get_session_folder(
+                session=session_name,
+                create=True,
+            )
+        )
+
+        manifest = (
+            self.local_upload_store.load_manifest(
+                session_name
+            )
+        )
+
+        manifest_path = (
+            self.local_upload_store.save_manifest(
+                session=session_name,
+                manifest=manifest,
+            )
+        )
+
+        return {
+            "session": session_name,
+            "session_folder": str(session_folder.resolve()),
+            "manifest_path": str(manifest_path.resolve()),
+        }
+
     
     def start_design_upload_job(self, message):
         upload_job_id = (
@@ -1691,6 +1732,104 @@ class GrasshopperAgent:
         
         if command == "downloadable_outputs":
             return self.start_download_job(message)
+
+        if command == "get_upload_session_path":
+            session = message.get("session")
+
+            if not session:
+                return error_response("Missing session.")
+
+            try:
+                session_info = self.get_upload_session_info(
+                    session=session,
+                )
+
+                return ok_response(
+                    message="Local upload session is ready.",
+                    **session_info,
+                )
+
+            except Exception as exc:
+                return error_response(str(exc))
+
+        if command == "register_local_upload":
+            session = message.get("session")
+            local_path = message.get("local_path")
+            domain = message.get("domain", "design")
+            category = message.get("category", "geometry")
+
+            if not session:
+                return error_response("Missing session.")
+
+            if not local_path:
+                return error_response("Missing local_path.")
+
+            try:
+                record = self.local_upload_store.register_file(
+                    session=session,
+                    local_path=local_path,
+                    domain=domain,
+                    category=category,
+                    design_output_index=message.get(
+                        "design_output_index"
+                    ),
+                    motion_output_index=message.get(
+                        "motion_output_index"
+                    ),
+                    upload_status=message.get(
+                        "upload_status",
+                        "pending",
+                    ),
+                )
+
+                return ok_response(
+                    message="Local upload file registered.",
+                    session=str(session),
+                    file=record,
+                    manifest_path=str(
+                        self.local_upload_store
+                        .get_manifest_path(session)
+                        .resolve()
+                    ),
+                )
+
+            except Exception as exc:
+                return error_response(str(exc))
+
+        if command == "list_local_uploads":
+            session = message.get("session")
+
+            if not session:
+                return error_response("Missing session.")
+
+            try:
+                files = self.local_upload_store.list_files(
+                    session=session,
+                    domain=message.get("domain"),
+                    design_output_index=message.get(
+                        "design_output_index"
+                    ),
+                    upload_status=message.get(
+                        "upload_status"
+                    ),
+                )
+
+                return ok_response(
+                    message="Local upload files listed.",
+                    session=str(session),
+                    manifest_path=str(
+                        self.local_upload_store
+                        .get_manifest_path(
+                            session=session,
+                            create_session_folder=False,
+                        )
+                        .resolve()
+                    ),
+                    files=files,
+                )
+
+            except Exception as exc:
+                return error_response(str(exc))
         
         if command == "upload_design_output":
             return self.start_design_upload_job(message)
