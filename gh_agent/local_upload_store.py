@@ -1,6 +1,6 @@
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -547,6 +547,6 @@ class LocalUploadStore:
         return cleaned or fallback
 
     def _now(self) -> str:
-        return datetime.now().isoformat(
-            timespec="seconds"
-        )
+        return datetime.now(
+            timezone.utc
+        ).isoformat()

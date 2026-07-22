@@ -1509,7 +1509,6 @@ class GrasshopperAgent:
 
             # ---------------------------------------------------------
             # Explicit file mode
-            # Preserves the existing upload API.
             # ---------------------------------------------------------
 
             if isinstance(files, list) and files:
@@ -1529,8 +1528,7 @@ class GrasshopperAgent:
 
                     if not local_path.is_file():
                         raise FileNotFoundError(
-                            f"Design file does not exist: "
-                            f"{local_path}"
+                            f"Design file does not exist: {local_path}"
                         )
 
                     if not category:
@@ -1563,45 +1561,8 @@ class GrasshopperAgent:
                     raise FileNotFoundError(
                         "No pending registered design files were found "
                         f"for session={session}, "
-                        "design_output_index="
-                        f"{design_output_index}."
+                        f"design_output_index={design_output_index}."
                     )
-
-            prepared_files = []
-
-            for index, file_record in enumerate(files):
-                if not isinstance(file_record, dict):
-                    raise ValueError(
-                        f"files[{index}] must be an object."
-                    )
-
-                local_path = Path(
-                    file_record.get("path") or ""
-                ).expanduser()
-
-                category = str(
-                    file_record.get("category") or ""
-                ).strip()
-
-                if not local_path.is_file():
-                    raise FileNotFoundError(
-                        f"Design file does not exist: "
-                        f"{local_path}"
-                    )
-
-                if not category:
-                    raise ValueError(
-                        f"files[{index}] is missing category."
-                    )
-
-                prepared_files.append(
-                    {
-                        "path": str(
-                            local_path.resolve()
-                        ),
-                        "category": category,
-                    }
-                )
 
             registered_filenames = [
                 item["filename"]
