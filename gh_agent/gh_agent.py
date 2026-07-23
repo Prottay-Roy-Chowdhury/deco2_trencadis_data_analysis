@@ -478,6 +478,166 @@ class GrasshopperAgent:
 
         return session_root / "download_manifest.json"
 
+    def update_manifest_from_design_download(
+        self,
+        session_name,
+        design_output_index,
+        downloaded_file,
+    ):
+        """
+        Adds or replaces one locally downloaded design file.
+
+        Manifest structure:
+
+        {
+            "session": "...",
+            "outputs": {... existing sensing data ...},
+            "design_outputs": {
+                "6": {
+                    "ghdata": {
+                        ...
+                    }
+                }
+            }
+        }
+        """
+
+        output_key = str(
+            int(design_output_index)
+        )
+
+        local_path = Path(
+            downloaded_file.get(
+                "local_path",
+                "",
+            )
+        )
+
+        if not local_path.is_file():
+            raise FileNotFoundError(
+                "Downloaded design file does not exist: "
+                f"{local_path}"
+            )
+
+        entry = {
+            "domain": "design",
+            "category": str(
+                downloaded_file.get(
+                    "category",
+                    "ghdata",
+                )
+            ).strip().lower(),
+            "name": str(
+                downloaded_file.get(
+                    "name",
+                    local_path.name,
+                )
+            ),
+            "local_path": str(
+                local_path.resolve()
+            ),
+            "remote_path": str(
+                downloaded_file.get(
+                    "remote_path",
+                    "",
+                )
+            ),
+            "size": local_path.stat().st_size,
+            "exists": True,
+            "downloaded_at": (
+                datetime.now().isoformat(
+                    timespec="seconds"
+                )
+            ),
+        }
+
+        with self.manifest_lock:
+            manifest = self.load_session_manifest(
+                session_name
+            )
+
+            design_outputs = manifest.setdefault(
+                "design_outputs",
+                {},
+            )
+
+            output_entry = design_outputs.setdefault(
+                output_key,
+                {},
+            )
+
+            output_entry[
+                entry["category"]
+            ] = entry
+
+            self.save_session_manifest(
+                session_name,
+                manifest,
+            )
+
+        return dict(entry)
+
+
+    def list_local_design_downloads(
+        self,
+        session_name,
+        design_output_index,
+        category="ghdata",
+    ):
+        manifest = self.load_session_manifest(
+            session_name
+        )
+
+        output_key = str(
+            int(design_output_index)
+        )
+
+        normalized_category = str(
+            category or "ghdata"
+        ).strip().lower()
+
+        design_outputs = manifest.get(
+            "design_outputs",
+            {},
+        )
+
+        output_entry = design_outputs.get(
+            output_key,
+            {},
+        )
+
+        stored_entry = output_entry.get(
+            normalized_category
+        )
+
+        if not isinstance(
+            stored_entry,
+            dict,
+        ):
+            return []
+
+        item = dict(
+            stored_entry
+        )
+
+        local_path = Path(
+            item.get(
+                "local_path",
+                "",
+            )
+        )
+
+        item["exists"] = (
+            local_path.is_file()
+        )
+
+        if item["exists"]:
+            item["size"] = (
+                local_path.stat().st_size
+            )
+
+        return [item]
+
 
     def create_empty_session_manifest(self, session_name):
         """
@@ -1320,6 +1480,424 @@ class GrasshopperAgent:
             )
 
             print(error_text)
+
+
+    def start_design_download_job(
+        self,
+        message,
+    ):
+        download_job_id = (
+            "design-download-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+        )
+
+        local_job = self.create_local_job(
+            job_id=download_job_id,
+            job_type="design_download",
+            status="download_queued",
+            progress=0,
+            message=(
+                "Design download job submitted."
+            ),
+            result=None,
+            error=None,
+        )
+
+        self.set_latest(
+            job_id=download_job_id,
+            status="download_queued",
+            message=(
+                "Design download job submitted."
+            ),
+            result=None,
+            clear_error=True,
+        )
+
+        self.write_log(
+            "Design download job submitted: "
+            f"{message}"
+        )
+
+        thread = threading.Thread(
+            target=self._run_design_download_job,
+            args=(
+                download_job_id,
+                dict(message),
+            ),
+            daemon=True,
+        )
+
+        thread.start()
+
+        return ok_response(
+            message=(
+                "Design download job submitted "
+                "to GH Agent."
+            ),
+            job_id=download_job_id,
+            latest_status="download_queued",
+            job=local_job,
+        )
+
+
+    def _run_design_download_job(
+        self,
+        job_id,
+        message,
+    ):
+        try:
+            session = str(
+                message.get("session") or ""
+            ).strip()
+
+            if not session:
+                raise ValueError(
+                    "Missing session."
+                )
+
+            try:
+                design_output_index = int(
+                    message.get(
+                        "design_output_index"
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "design_output_index "
+                    "must be an integer."
+                ) from exc
+
+            if design_output_index < 1:
+                raise ValueError(
+                    "design_output_index "
+                    "must be at least 1."
+                )
+
+            category = str(
+                message.get("category") or
+                "ghdata"
+            ).strip().lower()
+
+            self.update_local_job(
+                job_id=job_id,
+                status="download_running",
+                progress=5,
+                message=(
+                    "Resolving design output "
+                    "on the Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="download_running",
+                message=(
+                    "Resolving design output "
+                    "on the Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.write_log(
+                "Design download running: "
+                f"session={session}, "
+                "design_output_index="
+                f"{design_output_index}, "
+                f"category={category}"
+            )
+
+            # ---------------------------------------------------------
+            # Resolve the file through the Design_Output manifest
+            # ---------------------------------------------------------
+
+            resolution = (
+                self.python_client.send_command(
+                    {
+                        "command": (
+                            "get_design_output_file"
+                        ),
+                        "session": session,
+                        "design_output_index": (
+                            design_output_index
+                        ),
+                        "category": category,
+                    }
+                )
+            )
+
+            if resolution.get("status") != "ok":
+                failure_message = resolution.get(
+                    "message",
+                    "Could not resolve design output.",
+                )
+
+                self.update_local_job(
+                    job_id=job_id,
+                    status="download_failed",
+                    progress=100,
+                    message=failure_message,
+                    error=resolution,
+                )
+
+                self.set_latest(
+                    job_id=job_id,
+                    status="download_failed",
+                    message=failure_message,
+                    error=resolution,
+                )
+
+                self.write_log(
+                    "Design download failed while "
+                    "resolving the master file: "
+                    f"{resolution}"
+                )
+
+                return
+
+            file_record = resolution.get(
+                "file",
+                {},
+            )
+
+            remote_path = str(
+                file_record.get("path") or ""
+            ).strip()
+
+            filename = str(
+                file_record.get("name") or ""
+            ).strip()
+
+            if not remote_path:
+                raise ValueError(
+                    "Python master response is missing "
+                    "the design file path."
+                )
+
+            if not filename:
+                filename = Path(
+                    remote_path
+                ).name
+
+            if not filename:
+                raise ValueError(
+                    "Could not resolve the design filename."
+                )
+
+            # ---------------------------------------------------------
+            # Download into DATA_DOWNLOAD/<session>/design/
+            # ---------------------------------------------------------
+
+            local_path = (
+                RECEIVED_ROOT /
+                session /
+                "design" /
+                filename
+            )
+
+            self.update_local_job(
+                job_id=job_id,
+                status="download_running",
+                progress=30,
+                message=(
+                    f"Downloading design file: "
+                    f"{filename}"
+                ),
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="download_running",
+                message=(
+                    f"Downloading design file: "
+                    f"{filename}"
+                ),
+            )
+
+            self.write_log(
+                "Downloading design output: "
+                f"{remote_path} → {local_path}"
+            )
+
+            download_result = (
+                self.python_client.download_file(
+                    remote_file_path=remote_path,
+                    local_file_path=local_path,
+                )
+            )
+
+            if (
+                not isinstance(
+                    download_result,
+                    dict,
+                )
+                or download_result.get(
+                    "status"
+                ) != "ok"
+            ):
+                failure_message = (
+                    download_result.get(
+                        "message",
+                        "Design file download failed.",
+                    )
+                    if isinstance(
+                        download_result,
+                        dict,
+                    )
+                    else str(download_result)
+                )
+
+                raise RuntimeError(
+                    failure_message
+                )
+
+            if not local_path.is_file():
+                raise FileNotFoundError(
+                    "Design download reported success, "
+                    "but the local file does not exist: "
+                    f"{local_path}"
+                )
+
+            expected_size = file_record.get(
+                "size"
+            )
+
+            if expected_size is not None:
+                try:
+                    expected_size = int(
+                        expected_size
+                    )
+                except (TypeError, ValueError):
+                    expected_size = None
+
+            actual_size = (
+                local_path.stat().st_size
+            )
+
+            if (
+                expected_size is not None
+                and actual_size != expected_size
+            ):
+                raise IOError(
+                    "Downloaded design file size does "
+                    "not match the master record: "
+                    f"expected={expected_size}, "
+                    f"actual={actual_size}."
+                )
+
+            # ---------------------------------------------------------
+            # Persist the local design-file record
+            # ---------------------------------------------------------
+
+            manifest_entry = (
+                self.update_manifest_from_design_download(
+                    session_name=session,
+                    design_output_index=(
+                        design_output_index
+                    ),
+                    downloaded_file={
+                        "category": category,
+                        "name": filename,
+                        "remote_path": (
+                            remote_path
+                        ),
+                        "local_path": str(
+                            local_path
+                        ),
+                    },
+                )
+            )
+
+            manifest_path = (
+                self.get_session_manifest_path(
+                    session
+                )
+            )
+
+            final_result = {
+                "session": session,
+                "domain": "design",
+                "design_output_index": (
+                    design_output_index
+                ),
+                "category": category,
+                "file_path": str(
+                    local_path.resolve()
+                ),
+                "file": manifest_entry,
+                "manifest_path": str(
+                    manifest_path.resolve()
+                ),
+                "master_response": (
+                    resolution
+                ),
+            }
+
+            finished_message = (
+                "Design output downloaded "
+                "successfully: "
+                f"{filename}"
+            )
+
+            self.update_local_job(
+                job_id=job_id,
+                status="download_finished",
+                progress=100,
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="download_finished",
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.write_log(
+                finished_message +
+                ". Local path: " +
+                str(local_path.resolve())
+            )
+
+        except Exception:
+            error_text = (
+                traceback.format_exc()
+            )
+
+            try:
+                self.update_local_job(
+                    job_id=job_id,
+                    status="download_failed",
+                    progress=100,
+                    message=(
+                        "Design download exception."
+                    ),
+                    error=error_text,
+                )
+            except KeyError:
+                pass
+
+            self.set_latest(
+                job_id=job_id,
+                status="download_failed",
+                message=(
+                    "Design download exception."
+                ),
+                error=error_text,
+            )
+
+            self.write_log(
+                "Design download exception:\n"
+                f"{error_text}"
+            )
+
+            print(
+                error_text
+            )
+
 
     def get_upload_session_info(
         self,
@@ -2317,6 +2895,7 @@ class GrasshopperAgent:
             # Download & Upload jobs are managed locally by the GH Agent.
             if (
                 job_id.startswith("download-")
+                or job_id.startswith("design-download-")
                 or job_id.startswith("design-upload-")
                 or job_id.startswith("motion-upload-")
             ):
@@ -2353,6 +2932,55 @@ class GrasshopperAgent:
         
         if command == "downloadable_outputs":
             return self.start_download_job(message)
+
+        if command == "download_design_output":
+            return self.start_design_download_job(message)
+
+        if command == "list_local_design_downloads":
+            session = str(
+                message.get("session") or ""
+            ).strip()
+
+            if not session:
+                return error_response(
+                    "Missing session."
+                )
+
+            try:
+                design_output_index = int(
+                    message.get(
+                        "design_output_index"
+                    )
+                )
+            except (TypeError, ValueError):
+                return error_response(
+                    "design_output_index "
+                    "must be an integer."
+                )
+
+            files = (
+                self.list_local_design_downloads(
+                    session_name=session,
+                    design_output_index=(
+                        design_output_index
+                    ),
+                    category=message.get(
+                        "category",
+                        "ghdata",
+                    ),
+                )
+            )
+
+            return ok_response(
+                message=(
+                    "Local design downloads listed."
+                ),
+                session=session,
+                design_output_index=(
+                    design_output_index
+                ),
+                files=files,
+            )
 
         if command == "get_upload_session_path":
             session = message.get("session")
