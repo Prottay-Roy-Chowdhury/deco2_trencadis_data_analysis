@@ -8,6 +8,7 @@ from gh_agent.config import (
     PYTHON_AGENT_PORT,
     PYTHON_AGENT_FILE_PORT,
     PYTHON_AGENT_UPLOAD_PORT,
+    PYTHON_AGENT_MOTION_UPLOAD_PORT,
     FILE_CHUNK_SIZE,
 )
 from gh_agent.protocol import send_message, receive_message 
@@ -199,3 +200,172 @@ class PythonAgentClient:
                     completion_response = receive_message(sock)
     
                     return completion_response
+
+    def upload_motion_output(
+        self,
+        session,
+        motion_output_index,
+        files,
+        source_design_output_index=None,
+        created_by="motion_pc",
+        message="",
+    ):
+        """
+        Uploads local motion files to the Python master.
+
+        files format:
+
+        [
+            {
+                "path": "C:/.../motion_ghdata_01.ghdata",
+                "category": "ghdata",
+            },
+            {
+                "path": "C:/.../robot_program.mod",
+                "category": "program",
+            },
+        ]
+        """
+
+        if not session:
+            raise ValueError(
+                "Session cannot be empty."
+            )
+
+        try:
+            motion_index = int(
+                motion_output_index
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "motion_output_index must be an integer."
+            ) from exc
+
+        if motion_index < 1:
+            raise ValueError(
+                "motion_output_index must be at least 1."
+            )
+
+        source_design_index = None
+
+        if source_design_output_index is not None:
+            try:
+                source_design_index = int(
+                    source_design_output_index
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "source_design_output_index "
+                    "must be an integer."
+                ) from exc
+
+            if source_design_index < 1:
+                raise ValueError(
+                    "source_design_output_index "
+                    "must be at least 1."
+                )
+
+        if not isinstance(files, list) or not files:
+            raise ValueError(
+                "files must be a non-empty list."
+            )
+
+        prepared_files = []
+
+        for index, file_record in enumerate(files):
+            if not isinstance(file_record, dict):
+                raise ValueError(
+                    f"files[{index}] must be an object."
+                )
+
+            local_path = Path(
+                file_record.get("path") or ""
+            ).expanduser()
+
+            category = str(
+                file_record.get("category") or ""
+            ).strip()
+
+            if not local_path.is_file():
+                raise FileNotFoundError(
+                    "Motion file does not exist: "
+                    f"{local_path}"
+                )
+
+            if not category:
+                raise ValueError(
+                    f"files[{index}] is missing category."
+                )
+
+            prepared_files.append(
+                {
+                    "path": local_path.resolve(),
+                    "name": local_path.name,
+                    "category": category,
+                    "size": local_path.stat().st_size,
+                }
+            )
+
+        request = {
+            "command": "upload_motion_output",
+            "session": str(session).strip(),
+            "motion_output_index": motion_index,
+            "created_by": str(
+                created_by or "motion_pc"
+            ).strip(),
+            "message": str(message or ""),
+            "files": [
+                {
+                    "name": item["name"],
+                    "category": item["category"],
+                    "size": item["size"],
+                }
+                for item in prepared_files
+            ],
+        }
+
+        if source_design_index is not None:
+            request[
+                "source_design_output_index"
+            ] = source_design_index
+
+        with socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        ) as sock:
+            sock.connect(
+                (
+                    self.host,
+                    PYTHON_AGENT_MOTION_UPLOAD_PORT,
+                )
+            )
+
+            send_message(
+                sock,
+                request,
+            )
+
+            ready_response = receive_message(
+                sock
+            )
+
+            if ready_response.get("status") != "ok":
+                return ready_response
+
+            for item in prepared_files:
+                with item["path"].open("rb") as file:
+                    while True:
+                        chunk = file.read(
+                            FILE_CHUNK_SIZE
+                        )
+
+                        if not chunk:
+                            break
+
+                        sock.sendall(chunk)
+
+            completion_response = receive_message(
+                sock
+            )
+
+            return completion_response
