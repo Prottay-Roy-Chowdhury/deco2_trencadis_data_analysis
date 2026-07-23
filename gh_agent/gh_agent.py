@@ -1403,6 +1403,49 @@ class GrasshopperAgent:
 
         return prepared_files
 
+    def get_registered_motion_upload_files(
+        self,
+        session,
+        motion_output_index,
+        upload_status=None,
+    ):
+        records = self.local_upload_store.list_files(
+            session=session,
+            domain="motion",
+            motion_output_index=motion_output_index,
+            upload_status=upload_status,
+        )
+
+        prepared_files = []
+
+        for record in records:
+            if not record.get("exists", False):
+                continue
+
+            local_path = Path(
+                record.get("local_path", "")
+            )
+
+            if not local_path.is_file():
+                continue
+
+            category = str(
+                record.get("category") or ""
+            ).strip()
+
+            if not category:
+                continue
+
+            prepared_files.append(
+                {
+                    "path": str(local_path.resolve()),
+                    "category": category,
+                    "filename": local_path.name,
+                }
+            )
+
+        return prepared_files
+
     
     def start_design_upload_job(self, message):
         upload_job_id = (
@@ -1787,6 +1830,380 @@ class GrasshopperAgent:
                     "Could not update local upload manifest "
                     f"after failure: {manifest_exc}"
                 )
+
+    def start_motion_upload_job(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        if not session:
+            raise ValueError(
+                "session is required."
+            )
+
+        try:
+            motion_output_index = int(
+                message.get("motion_output_index")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "motion_output_index must be an integer."
+            ) from exc
+
+        if motion_output_index < 1:
+            raise ValueError(
+                "motion_output_index must be at least 1."
+            )
+
+        source_design_output_index = (
+            message.get(
+                "source_design_output_index"
+            )
+        )
+
+        if source_design_output_index is not None:
+            try:
+                source_design_output_index = int(
+                    source_design_output_index
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "source_design_output_index "
+                    "must be an integer."
+                ) from exc
+
+            if source_design_output_index < 1:
+                raise ValueError(
+                    "source_design_output_index "
+                    "must be at least 1."
+                )
+
+        job = self.job_manager.create_job(
+            job_type="motion_upload",
+            message=(
+                "Motion upload queued."
+            ),
+            metadata={
+                "session": session,
+                "motion_output_index": (
+                    motion_output_index
+                ),
+                "source_design_output_index": (
+                    source_design_output_index
+                ),
+            },
+        )
+
+        job_id = job["job_id"]
+
+        worker = threading.Thread(
+            target=self._run_motion_upload_job,
+            args=(
+                job_id,
+                dict(message),
+            ),
+            daemon=True,
+        )
+
+        worker.start()
+
+        return {
+            "status": "ok",
+            "message": (
+                "Motion upload job submitted."
+            ),
+            "job_id": job_id,
+            "latest_status": "upload_queued",
+            "session": session,
+            "motion_output_index": (
+                motion_output_index
+            ),
+        }
+
+
+    def _run_motion_upload_job(
+        self,
+        job_id,
+        message,
+    ):
+        session = ""
+        registered_filenames = []
+
+        try:
+            session = str(
+                message.get("session") or ""
+            ).strip()
+
+            motion_output_index = int(
+                message.get(
+                    "motion_output_index"
+                )
+            )
+
+            source_design_output_index = (
+                message.get(
+                    "source_design_output_index"
+                )
+            )
+
+            if source_design_output_index is not None:
+                source_design_output_index = int(
+                    source_design_output_index
+                )
+
+            created_by = str(
+                message.get("created_by") or
+                "motion_pc"
+            ).strip()
+
+            upload_message = str(
+                message.get("message") or
+                "Motion solution ready."
+            )
+
+            self.job_manager.update_job(
+                job_id,
+                status="upload_running",
+                progress=5,
+                message=(
+                    "Preparing motion files "
+                    "for upload."
+                ),
+            )
+
+            files = message.get("files")
+            prepared_files = []
+
+            # -----------------------------------------------------
+            # Explicit file mode
+            # -----------------------------------------------------
+
+            if isinstance(files, list) and files:
+                for index, file_record in enumerate(
+                    files
+                ):
+                    if not isinstance(
+                        file_record,
+                        dict,
+                    ):
+                        raise ValueError(
+                            f"files[{index}] "
+                            "must be an object."
+                        )
+
+                    local_path = Path(
+                        file_record.get("path")
+                        or ""
+                    ).expanduser()
+
+                    category = str(
+                        file_record.get(
+                            "category"
+                        ) or ""
+                    ).strip()
+
+                    if not local_path.is_file():
+                        raise FileNotFoundError(
+                            "Motion file does "
+                            "not exist: "
+                            f"{local_path}"
+                        )
+
+                    if not category:
+                        raise ValueError(
+                            f"files[{index}] "
+                            "is missing category."
+                        )
+
+                    prepared_files.append(
+                        {
+                            "path": str(
+                                local_path.resolve()
+                            ),
+                            "category": category,
+                            "filename": (
+                                local_path.name
+                            ),
+                        }
+                    )
+
+            # -----------------------------------------------------
+            # Registered local-manifest mode
+            # -----------------------------------------------------
+
+            else:
+                prepared_files = (
+                    self
+                    .get_registered_motion_upload_files(
+                        session=session,
+                        motion_output_index=(
+                            motion_output_index
+                        ),
+                        upload_status="pending",
+                    )
+                )
+
+                if not prepared_files:
+                    raise FileNotFoundError(
+                        "No pending registered "
+                        "motion files were found "
+                        f"for session={session}, "
+                        "motion_output_index="
+                        f"{motion_output_index}."
+                    )
+
+            registered_filenames = [
+                item["filename"]
+                for item in prepared_files
+            ]
+
+            self.local_upload_store.update_files_status(
+                session=session,
+                filenames=registered_filenames,
+                upload_status="uploading",
+                error=None,
+            )
+
+            self.job_manager.update_job(
+                job_id,
+                status="upload_running",
+                progress=20,
+                message=(
+                    f"Uploading "
+                    f"{len(prepared_files)} "
+                    "motion file(s)."
+                ),
+            )
+
+            result = (
+                self.python_agent_client
+                .upload_motion_output(
+                    session=session,
+                    motion_output_index=(
+                        motion_output_index
+                    ),
+                    source_design_output_index=(
+                        source_design_output_index
+                    ),
+                    files=[
+                        {
+                            "path": item["path"],
+                            "category": (
+                                item["category"]
+                            ),
+                        }
+                        for item in prepared_files
+                    ],
+                    created_by=created_by,
+                    message=upload_message,
+                )
+            )
+
+            if (
+                not isinstance(result, dict) or
+                result.get("status") != "ok"
+            ):
+                error_message = (
+                    result.get("message")
+                    if isinstance(result, dict)
+                    else str(result)
+                )
+
+                raise RuntimeError(
+                    error_message or
+                    "Motion upload failed."
+                )
+
+            master_output = result.get(
+                "output",
+                {}
+            )
+
+            master_files = master_output.get(
+                "files",
+                []
+            )
+
+            master_filename_by_original = {}
+
+            for master_file in master_files:
+                if not isinstance(
+                    master_file,
+                    dict,
+                ):
+                    continue
+
+                original_filename = str(
+                    master_file.get(
+                        "original_filename"
+                    ) or ""
+                )
+
+                master_filename = str(
+                    master_file.get(
+                        "filename"
+                    ) or ""
+                )
+
+                if original_filename:
+                    master_filename_by_original[
+                        original_filename
+                    ] = master_filename
+
+            for filename in registered_filenames:
+                self.local_upload_store.update_file_status(
+                    session=session,
+                    filename=filename,
+                    upload_status="uploaded",
+                    master_filename=(
+                        master_filename_by_original.get(
+                            filename
+                        )
+                    ),
+                    error=None,
+                )
+
+            self.job_manager.update_job(
+                job_id,
+                status="upload_finished",
+                progress=100,
+                message=(
+                    "Motion output uploaded "
+                    "successfully."
+                ),
+                result={
+                    "session": session,
+                    "motion_output_index": (
+                        motion_output_index
+                    ),
+                    "master_response": result,
+                },
+            )
+
+        except Exception as exc:
+            traceback.print_exc()
+
+            if session and registered_filenames:
+                try:
+                    self.local_upload_store.update_files_status(
+                        session=session,
+                        filenames=registered_filenames,
+                        upload_status="failed",
+                        error=str(exc),
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+            self.job_manager.update_job(
+                job_id,
+                status="upload_failed",
+                progress=100,
+                message="Motion upload failed.",
+                error=str(exc),
+            )
     
 
     def handle_local_message(self, message):
@@ -1957,6 +2374,9 @@ class GrasshopperAgent:
         
         if command == "upload_design_output":
             return self.start_design_upload_job(message)
+
+        if command == "upload_motion_output":
+            return self.start_motion_upload_job(message)
         
         if command == "list_local_downloads":
             session = message.get(
