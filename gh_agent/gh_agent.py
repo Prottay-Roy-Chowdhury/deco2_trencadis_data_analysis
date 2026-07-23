@@ -1835,93 +1835,53 @@ class GrasshopperAgent:
         self,
         message,
     ):
-        session = str(
-            message.get("session") or ""
-        ).strip()
-
-        if not session:
-            raise ValueError(
-                "session is required."
-            )
-
-        try:
-            motion_output_index = int(
-                message.get("motion_output_index")
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "motion_output_index must be an integer."
-            ) from exc
-
-        if motion_output_index < 1:
-            raise ValueError(
-                "motion_output_index must be at least 1."
-            )
-
-        source_design_output_index = (
-            message.get(
-                "source_design_output_index"
-            )
+        upload_job_id = (
+            f"motion-upload-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
         )
 
-        if source_design_output_index is not None:
-            try:
-                source_design_output_index = int(
-                    source_design_output_index
-                )
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "source_design_output_index "
-                    "must be an integer."
-                ) from exc
-
-            if source_design_output_index < 1:
-                raise ValueError(
-                    "source_design_output_index "
-                    "must be at least 1."
-                )
-
-        job = self.job_manager.create_job(
+        local_job = self.create_local_job(
+            job_id=upload_job_id,
             job_type="motion_upload",
-            message=(
-                "Motion upload queued."
-            ),
-            metadata={
-                "session": session,
-                "motion_output_index": (
-                    motion_output_index
-                ),
-                "source_design_output_index": (
-                    source_design_output_index
-                ),
-            },
+            status="upload_queued",
+            progress=0,
+            message="Motion upload job submitted.",
+            result=None,
+            error=None,
         )
 
-        job_id = job["job_id"]
+        self.set_latest(
+            job_id=upload_job_id,
+            status="upload_queued",
+            message="Motion upload job submitted.",
+            result=None,
+            clear_error=True,
+        )
 
-        worker = threading.Thread(
+        self.write_log(
+            f"Motion upload job submitted: {message}"
+        )
+
+        thread = threading.Thread(
             target=self._run_motion_upload_job,
             args=(
-                job_id,
+                upload_job_id,
                 dict(message),
             ),
             daemon=True,
         )
 
-        worker.start()
+        thread.start()
 
-        return {
-            "status": "ok",
-            "message": (
-                "Motion upload job submitted."
+        return ok_response(
+            message=(
+                "Motion upload job submitted "
+                "to GH Agent."
             ),
-            "job_id": job_id,
-            "latest_status": "upload_queued",
-            "session": session,
-            "motion_output_index": (
-                motion_output_index
-            ),
-        }
+            job_id=upload_job_id,
+            latest_status="upload_queued",
+            job=local_job,
+        )
 
 
     def _run_motion_upload_job(
@@ -1929,19 +1889,36 @@ class GrasshopperAgent:
         job_id,
         message,
     ):
-        session = ""
         registered_filenames = []
+        session = ""
 
         try:
             session = str(
                 message.get("session") or ""
             ).strip()
 
-            motion_output_index = int(
-                message.get(
-                    "motion_output_index"
+            if not session:
+                raise ValueError(
+                    "Missing session."
                 )
-            )
+
+            try:
+                motion_output_index = int(
+                    message.get(
+                        "motion_output_index"
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "motion_output_index "
+                    "must be an integer."
+                ) from exc
+
+            if motion_output_index < 1:
+                raise ValueError(
+                    "motion_output_index "
+                    "must be at least 1."
+                )
 
             source_design_output_index = (
                 message.get(
@@ -1950,36 +1927,28 @@ class GrasshopperAgent:
             )
 
             if source_design_output_index is not None:
-                source_design_output_index = int(
-                    source_design_output_index
-                )
+                try:
+                    source_design_output_index = int(
+                        source_design_output_index
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "source_design_output_index "
+                        "must be an integer."
+                    ) from exc
 
-            created_by = str(
-                message.get("created_by") or
-                "motion_pc"
-            ).strip()
-
-            upload_message = str(
-                message.get("message") or
-                "Motion solution ready."
-            )
-
-            self.job_manager.update_job(
-                job_id,
-                status="upload_running",
-                progress=5,
-                message=(
-                    "Preparing motion files "
-                    "for upload."
-                ),
-            )
+                if source_design_output_index < 1:
+                    raise ValueError(
+                        "source_design_output_index "
+                        "must be at least 1."
+                    )
 
             files = message.get("files")
             prepared_files = []
 
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
             # Explicit file mode
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
 
             if isinstance(files, list) and files:
                 for index, file_record in enumerate(
@@ -1995,8 +1964,7 @@ class GrasshopperAgent:
                         )
 
                     local_path = Path(
-                        file_record.get("path")
-                        or ""
+                        file_record.get("path") or ""
                     ).expanduser()
 
                     category = str(
@@ -2007,9 +1975,8 @@ class GrasshopperAgent:
 
                     if not local_path.is_file():
                         raise FileNotFoundError(
-                            "Motion file does "
-                            "not exist: "
-                            f"{local_path}"
+                            "Motion file does not "
+                            f"exist: {local_path}"
                         )
 
                     if not category:
@@ -2030,9 +1997,9 @@ class GrasshopperAgent:
                         }
                     )
 
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
             # Registered local-manifest mode
-            # -----------------------------------------------------
+            # ---------------------------------------------------------
 
             else:
                 prepared_files = (
@@ -2067,10 +2034,58 @@ class GrasshopperAgent:
                 error=None,
             )
 
-            self.job_manager.update_job(
-                job_id,
+            created_by = str(
+                message.get("created_by") or
+                "motion_pc"
+            ).strip()
+
+            upload_message = str(
+                message.get("message") or ""
+            )
+
+            self.update_local_job(
+                job_id=job_id,
                 status="upload_running",
-                progress=20,
+                progress=10,
+                message=(
+                    "Validated motion files. "
+                    "Connecting to Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_running",
+                message=(
+                    "Validated motion files. "
+                    "Connecting to Python master."
+                ),
+                clear_error=True,
+            )
+
+            self.write_log(
+                "Motion upload running: "
+                f"session={session}, "
+                "motion_output_index="
+                f"{motion_output_index}, "
+                f"file_count={len(prepared_files)}"
+            )
+
+            self.update_local_job(
+                job_id=job_id,
+                status="upload_running",
+                progress=25,
+                message=(
+                    f"Uploading "
+                    f"{len(prepared_files)} "
+                    "motion file(s)."
+                ),
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_running",
                 message=(
                     f"Uploading "
                     f"{len(prepared_files)} "
@@ -2079,112 +2094,179 @@ class GrasshopperAgent:
             )
 
             result = (
-                self.python_agent_client
+                self.python_client
                 .upload_motion_output(
                     session=session,
                     motion_output_index=(
                         motion_output_index
                     ),
+                    files=prepared_files,
                     source_design_output_index=(
                         source_design_output_index
                     ),
-                    files=[
-                        {
-                            "path": item["path"],
-                            "category": (
-                                item["category"]
-                            ),
-                        }
-                        for item in prepared_files
-                    ],
                     created_by=created_by,
                     message=upload_message,
                 )
             )
 
-            if (
-                not isinstance(result, dict) or
-                result.get("status") != "ok"
-            ):
-                error_message = (
-                    result.get("message")
-                    if isinstance(result, dict)
-                    else str(result)
+            if result.get("status") != "ok":
+                failure_message = result.get(
+                    "message",
+                    "Motion upload failed.",
                 )
 
-                raise RuntimeError(
-                    error_message or
-                    "Motion upload failed."
+                self.local_upload_store.update_files_status(
+                    session=session,
+                    filenames=registered_filenames,
+                    upload_status="failed",
+                    error=failure_message,
                 )
+
+                self.update_local_job(
+                    job_id=job_id,
+                    status="upload_failed",
+                    progress=100,
+                    message=failure_message,
+                    result=result,
+                    error=result,
+                )
+
+                self.set_latest(
+                    job_id=job_id,
+                    status="upload_failed",
+                    message=failure_message,
+                    result=result,
+                    error=result,
+                )
+
+                self.write_log(
+                    "Motion upload failed: "
+                    f"{result}"
+                )
+
+                return
+
+            master_file_mapping = {}
 
             master_output = result.get(
                 "output",
-                {}
+                {},
             )
 
-            master_files = master_output.get(
+            for file_record in master_output.get(
                 "files",
-                []
-            )
-
-            master_filename_by_original = {}
-
-            for master_file in master_files:
-                if not isinstance(
-                    master_file,
-                    dict,
-                ):
-                    continue
-
+                [],
+            ):
                 original_filename = str(
-                    master_file.get(
+                    file_record.get(
                         "original_filename"
                     ) or ""
-                )
+                ).strip()
 
                 master_filename = str(
-                    master_file.get(
+                    file_record.get(
                         "filename"
                     ) or ""
-                )
+                ).strip()
 
-                if original_filename:
-                    master_filename_by_original[
+                if (
+                    original_filename and
+                    master_filename
+                ):
+                    master_file_mapping[
                         original_filename
                     ] = master_filename
 
-            for filename in registered_filenames:
-                self.local_upload_store.update_file_status(
+            updated_local_records = (
+                self.local_upload_store
+                .update_files_status(
                     session=session,
-                    filename=filename,
+                    filenames=registered_filenames,
                     upload_status="uploaded",
-                    master_filename=(
-                        master_filename_by_original.get(
-                            filename
-                        )
+                    master_files=(
+                        master_file_mapping
                     ),
                     error=None,
                 )
-
-            self.job_manager.update_job(
-                job_id,
-                status="upload_finished",
-                progress=100,
-                message=(
-                    "Motion output uploaded "
-                    "successfully."
-                ),
-                result={
-                    "session": session,
-                    "motion_output_index": (
-                        motion_output_index
-                    ),
-                    "master_response": result,
-                },
             )
 
-        except Exception as exc:
-            traceback.print_exc()
+            finished_message = (
+                "Motion output uploaded "
+                "successfully: "
+                f"session={session}, "
+                "motion_output_index="
+                f"{motion_output_index}."
+            )
+
+            final_result = {
+                "session": session,
+                "motion_output_index": (
+                    motion_output_index
+                ),
+                "source_design_output_index": (
+                    source_design_output_index
+                ),
+                "uploaded_files": (
+                    prepared_files
+                ),
+                "local_manifest_files": (
+                    updated_local_records
+                ),
+                "master_response": result,
+            }
+
+            self.update_local_job(
+                job_id=job_id,
+                status="upload_finished",
+                progress=100,
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_finished",
+                message=finished_message,
+                result=final_result,
+                clear_error=True,
+            )
+
+            self.write_log(
+                finished_message
+            )
+
+        except Exception:
+            error_text = traceback.format_exc()
+
+            try:
+                self.update_local_job(
+                    job_id=job_id,
+                    status="upload_failed",
+                    progress=100,
+                    message=(
+                        "Motion upload exception."
+                    ),
+                    error=error_text,
+                )
+            except KeyError:
+                pass
+
+            self.set_latest(
+                job_id=job_id,
+                status="upload_failed",
+                message=(
+                    "Motion upload exception."
+                ),
+                error=error_text,
+            )
+
+            self.write_log(
+                "Motion upload exception:\n"
+                f"{error_text}"
+            )
+
+            print(error_text)
 
             if session and registered_filenames:
                 try:
@@ -2192,18 +2274,15 @@ class GrasshopperAgent:
                         session=session,
                         filenames=registered_filenames,
                         upload_status="failed",
-                        error=str(exc),
+                        error=error_text,
                     )
-                except Exception:
-                    traceback.print_exc()
-
-            self.job_manager.update_job(
-                job_id,
-                status="upload_failed",
-                progress=100,
-                message="Motion upload failed.",
-                error=str(exc),
-            )
+                except Exception as manifest_exc:
+                    self.write_log(
+                        "Could not update local "
+                        "upload manifest after "
+                        "motion upload failure: "
+                        f"{manifest_exc}"
+                    )
     
 
     def handle_local_message(self, message):
@@ -2239,6 +2318,7 @@ class GrasshopperAgent:
             if (
                 job_id.startswith("download-")
                 or job_id.startswith("design-upload-")
+                or job_id.startswith("motion-upload-")
             ):
                 try:
                     local_job = self.get_local_job(job_id)
@@ -2349,6 +2429,9 @@ class GrasshopperAgent:
                     domain=message.get("domain"),
                     design_output_index=message.get(
                         "design_output_index"
+                    ),
+                    motion_output_index=message.get(
+                        "motion_output_index"
                     ),
                     upload_status=message.get(
                         "upload_status"
