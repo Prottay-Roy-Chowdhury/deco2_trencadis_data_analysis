@@ -4,7 +4,9 @@ from pathlib import Path
 HOST = "0.0.0.0"
 COMMAND_PORT = 5005
 FILE_PORT = 5006
+
 UPLOAD_PORT = 5007
+MOTION_UPLOAD_PORT = 5008
 
 # Message size
 HEADER_SIZE = 8

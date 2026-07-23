@@ -10,7 +10,7 @@ from agent.config import (
     FILE_CHUNK_SIZE,
     HOST,
     PROJECT_ROOT,
-    UPLOAD_PORT,
+    MOTION_UPLOAD_PORT,
 )
 from agent.protocol import (
     error_response,
@@ -45,7 +45,7 @@ class MotionFileReceiver:
     def __init__(
         self,
         host: str = HOST,
-        port: int = UPLOAD_PORT,
+        port: int = MOTION_UPLOAD_PORT,
         sessions_root: Path | None = None,
     ):
         self.host = host

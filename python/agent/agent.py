@@ -7,6 +7,7 @@ from agent.protocol import receive_message, send_message, error_response
 from agent.command_handler import CommandHandler
 from agent.file_sender import FileSender
 from agent.design_file_receiver import DesignFileReceiver
+from agent.motion_file_receiver import MotionFileReceiver
 
 
 class PythonAgent:
@@ -16,6 +17,7 @@ class PythonAgent:
         self.handler = CommandHandler()
         self.file_sender = FileSender()
         self.design_file_receiver = DesignFileReceiver()
+        self.motion_file_receiver = MotionFileReceiver()
         self.running = False
 
     def start(self):
@@ -34,6 +36,13 @@ class PythonAgent:
             daemon=True,
         )
         upload_thread.start()
+
+        motion_upload_thread = threading.Thread(
+            target=self.motion_file_receiver.start,
+            daemon=True,
+        )
+
+        motion_upload_thread.start()
 
         self.running = True
 
