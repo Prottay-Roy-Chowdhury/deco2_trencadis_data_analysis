@@ -3,6 +3,7 @@ import threading
 from typing import Dict, Any
 from pathlib import Path
 from helpers.session_manager import load_session
+from helpers.design_output_store import DesignOutputStore
 from workflow.bootstrap import build_default_workflow_manager
 
 from agent.protocol import ok_response, error_response
@@ -21,6 +22,12 @@ class CommandHandler:
 
         sessions_root = project_root / "sessions"
         definitions_root = python_root / "workflow_definitions"
+
+        self.design_output_store = (
+            DesignOutputStore(
+                sessions_root=sessions_root,
+            )
+        )
 
         self.workflows = build_default_workflow_manager(
             sessions_root=sessions_root,
@@ -56,6 +63,11 @@ class CommandHandler:
         
         if command == "list_downloadable_outputs":
             return self.handle_list_downloadable_outputs(message)
+
+        if command == "get_design_output_file":
+            return self.handle_get_design_output_file(
+                message
+            )
         
         # Workflow commands.
         if command == "submit_workflow":
@@ -610,3 +622,179 @@ class CommandHandler:
             output_index=output_index,
             files=files
         )
+
+    def handle_get_design_output_file(
+        self,
+        message: Dict[str, Any],
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        try:
+            design_output_index = int(
+                message.get(
+                    "design_output_index"
+                )
+            )
+        except (TypeError, ValueError):
+            return error_response(
+                "design_output_index must be an integer."
+            )
+
+        if design_output_index < 1:
+            return error_response(
+                "design_output_index must be at least 1."
+            )
+
+        requested_category = str(
+            message.get("category") or
+            "ghdata"
+        ).strip().lower()
+
+        try:
+            output_entry = (
+                self.design_output_store
+                .get_output(
+                    session=session,
+                    design_output_index=(
+                        design_output_index
+                    ),
+                )
+            )
+
+            output_status = str(
+                output_entry.get("status") or ""
+            ).strip().lower()
+
+            if output_status != "finished":
+                return error_response(
+                    "Design output is not finished: "
+                    f"session={session}, "
+                    "design_output_index="
+                    f"{design_output_index}, "
+                    f"status={output_status or 'unknown'}."
+                )
+
+            matching_files = []
+
+            for file_record in output_entry.get(
+                "files",
+                [],
+            ):
+                if not isinstance(
+                    file_record,
+                    dict,
+                ):
+                    continue
+
+                category = str(
+                    file_record.get("category") or ""
+                ).strip().lower()
+
+                if category != requested_category:
+                    continue
+
+                filename = str(
+                    file_record.get("filename") or ""
+                ).strip()
+
+                if not filename:
+                    continue
+
+                matching_files.append(
+                    {
+                        "category": category,
+                        "filename": filename,
+                        "original_filename": str(
+                            file_record.get(
+                                "original_filename"
+                            ) or ""
+                        ).strip(),
+                        "size_bytes": file_record.get(
+                            "size_bytes"
+                        ),
+                    }
+                )
+
+            if not matching_files:
+                return error_response(
+                    "No design output file was found "
+                    f"for category={requested_category}, "
+                    f"session={session}, "
+                    "design_output_index="
+                    f"{design_output_index}."
+                )
+
+            if len(matching_files) > 1:
+                return error_response(
+                    "Multiple design output files matched "
+                    f"category={requested_category}, "
+                    f"session={session}, "
+                    "design_output_index="
+                    f"{design_output_index}. "
+                    "The result is ambiguous."
+                )
+
+            selected_file = matching_files[0]
+
+            output_folder = (
+                self.design_output_store
+                .get_output_folder(
+                    session=session,
+                    create=False,
+                )
+            )
+
+            file_path = (
+                output_folder /
+                selected_file["filename"]
+            )
+
+            if not file_path.is_file():
+                return error_response(
+                    "Design output file is listed in the "
+                    "manifest but does not exist: "
+                    f"{file_path}"
+                )
+
+            actual_size = (
+                file_path.stat().st_size
+            )
+
+            return ok_response(
+                message=(
+                    "Design output file resolved."
+                ),
+                session=session,
+                design_output_index=(
+                    design_output_index
+                ),
+                category=requested_category,
+                file={
+                    "name": file_path.name,
+                    "path": str(
+                        file_path.resolve()
+                    ),
+                    "size": actual_size,
+                    "category": (
+                        requested_category
+                    ),
+                    "original_filename": (
+                        selected_file[
+                            "original_filename"
+                        ]
+                    ),
+                },
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not resolve design output file: "
+                f"{exc}"
+            )
