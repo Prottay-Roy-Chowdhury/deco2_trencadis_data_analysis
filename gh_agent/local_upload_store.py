@@ -384,16 +384,21 @@ class LocalUploadStore:
         session: str,
         domain: str | None = None,
         design_output_index: int | None = None,
+        motion_output_index: int | None = None,
         upload_status: str | None = None,
     ) -> list[dict[str, Any]]:
-        manifest = self.load_manifest(session)
+        manifest = self.load_manifest(
+            session
+        )
 
         normalized_domain = None
 
         if domain:
-            normalized_domain = self._sanitize_name(
-                domain,
-                fallback="",
+            normalized_domain = (
+                self._sanitize_name(
+                    domain,
+                    fallback="",
+                )
             )
 
         requested_design_index = None
@@ -406,9 +411,24 @@ class LocalUploadStore:
                 )
             )
 
-        results: list[dict[str, Any]] = []
+        requested_motion_index = None
 
-        for record in manifest.get("files", []):
+        if motion_output_index is not None:
+            requested_motion_index = (
+                self._validate_index(
+                    motion_output_index,
+                    "motion_output_index",
+                )
+            )
+
+        results: list[
+            dict[str, Any]
+        ] = []
+
+        for record in manifest.get(
+            "files",
+            [],
+        ):
             if (
                 normalized_domain is not None
                 and record.get("domain")
@@ -418,25 +438,40 @@ class LocalUploadStore:
 
             if (
                 requested_design_index is not None
-                and record.get("design_output_index")
-                != requested_design_index
+                and record.get(
+                    "design_output_index"
+                ) != requested_design_index
+            ):
+                continue
+
+            if (
+                requested_motion_index is not None
+                and record.get(
+                    "motion_output_index"
+                ) != requested_motion_index
             ):
                 continue
 
             if (
                 upload_status is not None
-                and record.get("upload_status")
-                != upload_status
+                and record.get(
+                    "upload_status"
+                ) != upload_status
             ):
                 continue
 
             item = dict(record)
 
             path = Path(
-                item.get("local_path", "")
+                item.get(
+                    "local_path",
+                    "",
+                )
             )
 
-            item["exists"] = path.is_file()
+            item["exists"] = (
+                path.is_file()
+            )
 
             if item["exists"]:
                 item["size_bytes"] = (
