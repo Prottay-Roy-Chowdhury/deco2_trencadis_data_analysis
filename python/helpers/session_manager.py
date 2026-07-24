@@ -57,6 +57,26 @@ def _safe_latest_pointer(parent: Path, session_dir: Path):
     except Exception:
         latest.write_text(str(session_dir.resolve()), encoding="utf-8")  # text fallback
 
+def ensure_session_directories(
+    paths: SessionPaths,
+) -> SessionPaths:
+    for directory in (
+        paths.exported_data,
+        paths.initial_point_clouds,
+        paths.initial_images,
+        paths.initial_depth_images,
+        paths.merged_point_clouds,
+        paths.merged_images,
+        paths.merged_depth_images,
+        paths.camera_intrinsics,
+    ):
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+    return paths
+
 
 def init_session(project_root: str | Path = ".", session_name: str = "Test 01") -> SessionPaths:
     """
@@ -134,20 +154,22 @@ def init_session(project_root: str | Path = ".", session_name: str = "Test 01") 
     _safe_latest_pointer(sessions_dir, session_dir)
     (project_root / RECENT_FILE).write_text(session_name, encoding="utf-8")
 
-    return SessionPaths(
-        root=session_dir,
-        exported_data=exported,
-        initial_point_clouds=initial,
-        initial_images=initial_images,
-        initial_depth_images=initial_depth_images,
-        merged_point_clouds=merged,
-        merged_images=merged_images,
-        merged_depth_images=merged_depth_images,
-        camera_intrinsics=camera_intrinsics,
-        manifest=manifest,
-        session_name=session_name,
-        global_transforms_root=GLOBAL_TRANSFORMS_DIR,
-        eye_to_base_transforms_root=EYE_TO_BASE_TRANSFORMS_DIR,
+    return ensure_session_directories(
+        SessionPaths(
+            root=session_dir,
+            exported_data=exported,
+            initial_point_clouds=initial,
+            initial_images=initial_images,
+            initial_depth_images=initial_depth_images,
+            merged_point_clouds=merged,
+            merged_images=merged_images,
+            merged_depth_images=merged_depth_images,
+            camera_intrinsics=camera_intrinsics,
+            manifest=manifest,
+            session_name=session_name,
+            global_transforms_root=GLOBAL_TRANSFORMS_DIR,
+            eye_to_base_transforms_root=EYE_TO_BASE_TRANSFORMS_DIR,
+        )
     )
 
 
@@ -191,20 +213,22 @@ def load_session(project_root: str | Path = ".", session_name: str | None = None
             print(f"[warn] Eye-to-base transforms folder missing at: {eye_to_base_tf}")
             print("       Create it manually: helpers/Transformation matrix_eye_to_base")
 
-        return SessionPaths(
-            root=session_dir,
-            exported_data=Path(data["exported_data"]),
-            initial_point_clouds=Path(data["initial_point_clouds"]),
-            initial_images=Path(data["initial_images"]),
-            initial_depth_images=Path(data["initial_depth_images"]),
-            merged_point_clouds=Path(data["merged_point_clouds"]),
-            merged_images=Path(data["merged_images"]),
-            merged_depth_images=Path(data["merged_depth_images"]),
-            camera_intrinsics=Path(data["camera_intrinsics"]),
-            manifest=manifest,
-            session_name=data["session_name"],
-            global_transforms_root=global_tf,
-            eye_to_base_transforms_root=eye_to_base_tf,
+        return ensure_session_directories(
+            SessionPaths(
+                root=session_dir,
+                exported_data=Path(data["exported_data"]),
+                initial_point_clouds=Path(data["initial_point_clouds"]),
+                initial_images=Path(data["initial_images"]),
+                initial_depth_images=Path(data["initial_depth_images"]),
+                merged_point_clouds=Path(data["merged_point_clouds"]),
+                merged_images=Path(data["merged_images"]),
+                merged_depth_images=Path(data["merged_depth_images"]),
+                camera_intrinsics=Path(data["camera_intrinsics"]),
+                manifest=manifest,
+                session_name=data["session_name"],
+                global_transforms_root=global_tf,
+                eye_to_base_transforms_root=eye_to_base_tf,
+            )
         )
 
     # reconstruct if manifest missing
@@ -214,20 +238,22 @@ def load_session(project_root: str | Path = ".", session_name: str | None = None
     if not EYE_TO_BASE_TRANSFORMS_DIR.exists():
         print(f"[warn] Eye-to-base transforms folder not found at: {EYE_TO_BASE_TRANSFORMS_DIR}")
         
-    return SessionPaths(
-        root=session_dir,
-        exported_data=session_dir / DIR_EXPORTED,
-        initial_point_clouds=session_dir / DIR_INITIAL,
-        initial_images=session_dir / DIR_INITIAL_IMAGES,
-        initial_depth_images=session_dir / DIR_INITIAL_DEPTH_IMAGES,
-        merged_point_clouds=session_dir / DIR_MERGED,
-        merged_images=session_dir / DIR_MERGED_IMAGES,
-        merged_depth_images=session_dir / DIR_MERGED_DEPTH_IMAGES,
-        camera_intrinsics=session_dir / DIR_INTRINSICS,
-        manifest=manifest,
-        session_name=session_dir.name,
-        global_transforms_root=GLOBAL_TRANSFORMS_DIR,
-        eye_to_base_transforms_root=EYE_TO_BASE_TRANSFORMS_DIR,
+    return ensure_session_directories(
+        SessionPaths(
+            root=session_dir,
+            exported_data=session_dir / DIR_EXPORTED,
+            initial_point_clouds=session_dir / DIR_INITIAL,
+            initial_images=session_dir / DIR_INITIAL_IMAGES,
+            initial_depth_images=session_dir / DIR_INITIAL_DEPTH_IMAGES,
+            merged_point_clouds=session_dir / DIR_MERGED,
+            merged_images=session_dir / DIR_MERGED_IMAGES,
+            merged_depth_images=session_dir / DIR_MERGED_DEPTH_IMAGES,
+            camera_intrinsics=session_dir / DIR_INTRINSICS,
+            manifest=manifest,
+            session_name=session_dir.name,
+            global_transforms_root=GLOBAL_TRANSFORMS_DIR,
+            eye_to_base_transforms_root=EYE_TO_BASE_TRANSFORMS_DIR,
+        )
     )
 
 
