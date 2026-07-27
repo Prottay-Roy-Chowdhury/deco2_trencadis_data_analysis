@@ -1,6 +1,7 @@
 import socket
 import traceback
 import threading
+from pathlib import Path
 
 from agent.config import HOST, COMMAND_PORT, AGENT_NAME, AGENT_VERSION
 from agent.protocol import receive_message, send_message, error_response
@@ -8,6 +9,9 @@ from agent.command_handler import CommandHandler
 from agent.file_sender import FileSender
 from agent.design_file_receiver import DesignFileReceiver
 from agent.motion_file_receiver import MotionFileReceiver
+from workflow.project_pipeline_monitor import (
+    ProjectPipelineMonitor,
+)
 
 
 class PythonAgent:
@@ -18,6 +22,25 @@ class PythonAgent:
         self.file_sender = FileSender()
         self.design_file_receiver = DesignFileReceiver()
         self.motion_file_receiver = MotionFileReceiver()
+        python_root = (
+            Path(__file__).resolve().parents[1]
+        )
+
+        project_root = (
+            python_root.parent
+        )
+
+        sessions_root = (
+            project_root /
+            "sessions"
+        )
+
+        self.project_pipeline_monitor = (
+            ProjectPipelineMonitor(
+                sessions_root=sessions_root,
+                evaluation_interval_seconds=1.0,
+            )
+        )
         self.running = False
 
     def start(self):
@@ -43,6 +66,19 @@ class PythonAgent:
         )
 
         motion_upload_thread.start()
+
+        monitor_started = (
+            self.project_pipeline_monitor.start()
+        )
+
+        print(
+            "[agent] Project pipeline monitor "
+            + (
+                "started."
+                if monitor_started
+                else "was already running."
+            )
+        )
 
         self.running = True
 
@@ -83,7 +119,22 @@ class PythonAgent:
 
             finally:
                 self.running = False
-                print("[agent] Shutting down...")
+
+                print(
+                    "[agent] Stopping project "
+                    "pipeline monitor..."
+                )
+
+                try:
+                    self.project_pipeline_monitor.stop(
+                        join_timeout_seconds=2.0,
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+                print(
+                    "[agent] Shutting down..."
+                )
 
 
 def main():
