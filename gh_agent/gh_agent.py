@@ -33,17 +33,47 @@ from gh_agent.project_action_store import (
 
 
 class GrasshopperAgent:
+    VALID_PROJECT_ACTION_TARGETS = {
+        "design_pc",
+        "motion_pc",
+    }
     def __init__(
-            self,
-            host: str = LOCAL_GH_AGENT_HOST,
-            port: int = LOCAL_GH_AGENT_PORT):
+        self,
+        host: str = LOCAL_GH_AGENT_HOST,
+        port: int = LOCAL_GH_AGENT_PORT,
+        project_action_target: str | None = None,
+    ):
         self.host = host
-        self.port = port
+        self.port = int(
+            port
+        )
+
+        normalized_target = str(
+            project_action_target or ""
+        ).strip().lower()
+
+        if (
+            normalized_target
+            not in self.VALID_PROJECT_ACTION_TARGETS
+        ):
+            raise ValueError(
+                "project_action_target must be "
+                "'design_pc' or 'motion_pc'."
+            )
+
+        self.project_action_target = (
+            normalized_target
+        )
         self.python_client = PythonAgentClient()
         self.local_upload_store = LocalUploadStore()
+        project_action_root = (
+            LOCAL_RECEIVED_ROOT /
+            self.project_action_target
+        )
+
         self.project_action_store = (
             ProjectActionStore(
-                root=LOCAL_RECEIVED_ROOT,
+                root=project_action_root,
             )
         )
         self.running = False
