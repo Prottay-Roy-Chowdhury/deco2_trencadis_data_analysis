@@ -4,7 +4,14 @@ from typing import Dict, Any
 from pathlib import Path
 from helpers.session_manager import load_session
 from helpers.design_output_store import DesignOutputStore
-from workflow.bootstrap import build_default_workflow_manager
+
+from workflow.bootstrap import (
+    build_default_workflow_manager,
+)
+
+from workflow.project_pipeline_orchestrator import (
+    ProjectPipelineOrchestrator,
+)
 
 from agent.protocol import ok_response, error_response
 from agent.job_manager import JobManager
@@ -32,6 +39,12 @@ class CommandHandler:
         self.workflows = build_default_workflow_manager(
             sessions_root=sessions_root,
             definitions_root=definitions_root,
+        )
+
+        self.project_pipeline = (
+            ProjectPipelineOrchestrator(
+                sessions_root=sessions_root,
+            )
         )
 
     def handle(self, message: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,6 +94,27 @@ class CommandHandler:
 
         if command == "list_workflows":
             return self.handle_list_workflows(message)
+
+        if command == "initialize_project_pipeline":
+            return (
+                self.handle_initialize_project_pipeline(
+                    message
+                )
+            )
+
+        if command == "evaluate_project_pipeline":
+            return (
+                self.handle_evaluate_project_pipeline(
+                    message
+                )
+            )
+
+        if command == "get_project_pipeline_status":
+            return (
+                self.handle_get_project_pipeline_status(
+                    message
+                )
+            )
 
         return error_response(f"Unknown command: {command}")
 
@@ -214,6 +248,226 @@ class CommandHandler:
         except Exception as e:
             return error_response(
                 message=f"Could not list workflows: {e}"
+            )
+
+    def handle_initialize_project_pipeline(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        workflow_id = str(
+            message.get("workflow_id") or ""
+        ).strip() or None
+
+        processing_output_index = (
+            message.get(
+                "processing_output_index"
+            )
+        )
+
+        overwrite = bool(
+            message.get(
+                "overwrite",
+                False,
+            )
+        )
+
+        metadata = message.get(
+            "metadata",
+            {},
+        )
+
+        if not isinstance(
+            metadata,
+            dict,
+        ):
+            return error_response(
+                "metadata must be an object."
+            )
+
+        if processing_output_index is not None:
+            try:
+                processing_output_index = int(
+                    processing_output_index
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return error_response(
+                    "processing_output_index "
+                    "must be an integer."
+                )
+
+            if processing_output_index < 1:
+                return error_response(
+                    "processing_output_index "
+                    "must be at least 1."
+                )
+
+        try:
+            state = (
+                self.project_pipeline
+                .initialize_session(
+                    session=session,
+                    workflow_id=workflow_id,
+                    processing_output_index=(
+                        processing_output_index
+                    ),
+                    overwrite=overwrite,
+                    metadata=metadata,
+                )
+            )
+
+            return ok_response(
+                message=(
+                    "Project pipeline initialized."
+                ),
+                session=session,
+                project_pipeline=state,
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not initialize project "
+                f"pipeline: {exc}"
+            )
+
+
+    def handle_evaluate_project_pipeline(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        workflow_id = str(
+            message.get("workflow_id") or ""
+        ).strip() or None
+
+        processing_output_index = (
+            message.get(
+                "processing_output_index"
+            )
+        )
+
+        if processing_output_index is not None:
+            try:
+                processing_output_index = int(
+                    processing_output_index
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return error_response(
+                    "processing_output_index "
+                    "must be an integer."
+                )
+
+            if processing_output_index < 1:
+                return error_response(
+                    "processing_output_index "
+                    "must be at least 1."
+                )
+
+        try:
+            result = (
+                self.project_pipeline
+                .evaluate_session(
+                    session=session,
+                    workflow_id=workflow_id,
+                    processing_output_index=(
+                        processing_output_index
+                    ),
+                )
+            )
+
+            state_after = result.get(
+                "state_after",
+                {},
+            )
+
+            return ok_response(
+                message=result.get(
+                    "message",
+                    "Project pipeline evaluated.",
+                ),
+                session=session,
+                transitioned=result.get(
+                    "transitioned",
+                    False,
+                ),
+                transition=result.get(
+                    "transition"
+                ),
+                project_pipeline_status=(
+                    state_after.get(
+                        "status"
+                    )
+                ),
+                evaluation=result,
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not evaluate project "
+                f"pipeline: {exc}"
+            )
+
+
+    def handle_get_project_pipeline_status(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        try:
+            state = (
+                self.project_pipeline
+                .get_status(
+                    session=session,
+                )
+            )
+
+            return ok_response(
+                message=(
+                    "Project pipeline status loaded."
+                ),
+                session=session,
+                project_pipeline=state,
+            )
+
+        except FileNotFoundError as exc:
+            return error_response(
+                str(exc)
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not get project pipeline "
+                f"status: {exc}"
             )
 
     # def handle_get_file_metadata(self, message):
