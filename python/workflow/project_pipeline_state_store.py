@@ -1091,6 +1091,7 @@ class ProjectPipelineStateStore:
                     "running",
                 },
                 "completed": {
+                    "pending",
                     "claimed",
                     "running",
                     "completed",

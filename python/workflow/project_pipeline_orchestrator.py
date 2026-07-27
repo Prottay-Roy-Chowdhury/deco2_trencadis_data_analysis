@@ -157,6 +157,7 @@ class ProjectPipelineOrchestrator:
             "workflow": None,
             "design_output": None,
             "motion_output": None,
+            "project_action": None,
         }
 
         if current_status in self.TERMINAL_STATUSES:
@@ -452,13 +453,50 @@ class ProjectPipelineOrchestrator:
             "processing_output_index"
         )
 
-        design_output = (
-            self._select_design_output(
+        if processing_index is None:
+            return self._transition_failed(
                 session=session,
-                source_processing_output_index=(
-                    processing_index
+                state=state,
+                observation=observation,
+                message=(
+                    "Design stage cannot start because "
+                    "processing_output_index is missing."
                 ),
+                error=(
+                    "Missing processing_output_index."
+                ),
+                job_id=None,
             )
+
+        processing_index = self._validate_index(
+            processing_index,
+            "processing_output_index",
+        )
+
+        # ---------------------------------------------------------
+        # Inspect an existing design action
+        # ---------------------------------------------------------
+
+        action_result = self._inspect_stage_action(
+            session=session,
+            state=state,
+            observation=observation,
+            expected_action="run_design",
+            expected_target="design_pc",
+        )
+
+        if action_result is not None:
+            return action_result
+
+        # ---------------------------------------------------------
+        # Search for durable design output
+        # ---------------------------------------------------------
+
+        design_output = self._select_design_output(
+            session=session,
+            source_processing_output_index=(
+                processing_index
+            ),
         )
 
         observation["design_output"] = (
@@ -468,13 +506,43 @@ class ProjectPipelineOrchestrator:
         )
 
         if design_output is None:
-            observation["state_after"] = deepcopy(
-                state
+            action_record = (
+                self.state_store
+                .create_pending_action(
+                    session=session,
+                    action="run_design",
+                    target="design_pc",
+                    source_output_index=(
+                        processing_index
+                    ),
+                    expected_pipeline_status=(
+                        self._normalize(
+                            state.get("status")
+                        )
+                    ),
+                    metadata={
+                        "session": session,
+                        "processing_output_index": (
+                            processing_index
+                        ),
+                    },
+                )
+            )
+
+            observation["project_action"] = (
+                deepcopy(action_record)
+            )
+
+            observation["state_after"] = (
+                self.state_store.load(
+                    session
+                )
             )
 
             observation["message"] = (
-                "Waiting for a matching design "
-                "output manifest entry."
+                "Design stage is pending. "
+                "A run_design action is available "
+                "for the Design PC."
             )
 
             return observation
@@ -502,8 +570,37 @@ class ProjectPipelineOrchestrator:
             )
 
         if design_status != "finished":
-            observation["state_after"] = deepcopy(
-                state
+            action_record = (
+                self.state_store
+                .create_pending_action(
+                    session=session,
+                    action="run_design",
+                    target="design_pc",
+                    source_output_index=(
+                        processing_index
+                    ),
+                    expected_pipeline_status=(
+                        self._normalize(
+                            state.get("status")
+                        )
+                    ),
+                    metadata={
+                        "session": session,
+                        "processing_output_index": (
+                            processing_index
+                        ),
+                    },
+                )
+            )
+
+            observation["project_action"] = (
+                deepcopy(action_record)
+            )
+
+            observation["state_after"] = (
+                self.state_store.load(
+                    session
+                )
             )
 
             observation["message"] = (
@@ -513,6 +610,27 @@ class ProjectPipelineOrchestrator:
             )
 
             return observation
+
+        # ---------------------------------------------------------
+        # Durable output supersedes the action state
+        # ---------------------------------------------------------
+
+        self._complete_and_clear_stage_action(
+            session=session,
+            expected_action="run_design",
+            result={
+                "design_output_index": (
+                    design_index
+                ),
+                "source_processing_output_index": (
+                    processing_index
+                ),
+            },
+            message=(
+                "Design output was confirmed "
+                "through the master manifest."
+            ),
+        )
 
         updated = self.state_store.transition(
             session=session,
@@ -561,13 +679,50 @@ class ProjectPipelineOrchestrator:
             "design_output_index"
         )
 
-        motion_output = (
-            self._select_motion_output(
+        if design_index is None:
+            return self._transition_failed(
                 session=session,
-                source_design_output_index=(
-                    design_index
+                state=state,
+                observation=observation,
+                message=(
+                    "Motion stage cannot start because "
+                    "design_output_index is missing."
                 ),
+                error=(
+                    "Missing design_output_index."
+                ),
+                job_id=None,
             )
+
+        design_index = self._validate_index(
+            design_index,
+            "design_output_index",
+        )
+
+        # ---------------------------------------------------------
+        # Inspect an existing motion action
+        # ---------------------------------------------------------
+
+        action_result = self._inspect_stage_action(
+            session=session,
+            state=state,
+            observation=observation,
+            expected_action="run_motion",
+            expected_target="motion_pc",
+        )
+
+        if action_result is not None:
+            return action_result
+
+        # ---------------------------------------------------------
+        # Search for durable motion output
+        # ---------------------------------------------------------
+
+        motion_output = self._select_motion_output(
+            session=session,
+            source_design_output_index=(
+                design_index
+            ),
         )
 
         observation["motion_output"] = (
@@ -577,13 +732,43 @@ class ProjectPipelineOrchestrator:
         )
 
         if motion_output is None:
-            observation["state_after"] = deepcopy(
-                state
+            action_record = (
+                self.state_store
+                .create_pending_action(
+                    session=session,
+                    action="run_motion",
+                    target="motion_pc",
+                    source_output_index=(
+                        design_index
+                    ),
+                    expected_pipeline_status=(
+                        self._normalize(
+                            state.get("status")
+                        )
+                    ),
+                    metadata={
+                        "session": session,
+                        "design_output_index": (
+                            design_index
+                        ),
+                    },
+                )
+            )
+
+            observation["project_action"] = (
+                deepcopy(action_record)
+            )
+
+            observation["state_after"] = (
+                self.state_store.load(
+                    session
+                )
             )
 
             observation["message"] = (
-                "Waiting for a matching motion "
-                "output manifest entry."
+                "Motion stage is pending. "
+                "A run_motion action is available "
+                "for the Motion PC."
             )
 
             return observation
@@ -611,8 +796,37 @@ class ProjectPipelineOrchestrator:
             )
 
         if motion_status != "finished":
-            observation["state_after"] = deepcopy(
-                state
+            action_record = (
+                self.state_store
+                .create_pending_action(
+                    session=session,
+                    action="run_motion",
+                    target="motion_pc",
+                    source_output_index=(
+                        design_index
+                    ),
+                    expected_pipeline_status=(
+                        self._normalize(
+                            state.get("status")
+                        )
+                    ),
+                    metadata={
+                        "session": session,
+                        "design_output_index": (
+                            design_index
+                        ),
+                    },
+                )
+            )
+
+            observation["project_action"] = (
+                deepcopy(action_record)
+            )
+
+            observation["state_after"] = (
+                self.state_store.load(
+                    session
+                )
             )
 
             observation["message"] = (
@@ -622,6 +836,23 @@ class ProjectPipelineOrchestrator:
             )
 
             return observation
+
+        self._complete_and_clear_stage_action(
+            session=session,
+            expected_action="run_motion",
+            result={
+                "motion_output_index": (
+                    motion_index
+                ),
+                "source_design_output_index": (
+                    design_index
+                ),
+            },
+            message=(
+                "Motion output was confirmed "
+                "through the master manifest."
+            ),
+        )
 
         updated = self.state_store.transition(
             session=session,
@@ -892,6 +1123,181 @@ class ProjectPipelineOrchestrator:
                     return found
 
         return None
+
+    # ============================================================
+    # PROJECT ACTION HELPERS
+    # ============================================================
+
+    def _inspect_stage_action(
+        self,
+        session: str,
+        state: dict[str, Any],
+        observation: dict[str, Any],
+        expected_action: str,
+        expected_target: str,
+    ) -> dict[str, Any] | None:
+        action_record = state.get(
+            "pending_action"
+        )
+
+        if not isinstance(
+            action_record,
+            dict,
+        ):
+            return None
+
+        action_name = self._normalize(
+            action_record.get("action")
+        )
+
+        action_target = self._normalize(
+            action_record.get("target")
+        )
+
+        if (
+            action_name != expected_action
+            or action_target != expected_target
+        ):
+            return self._transition_failed(
+                session=session,
+                state=state,
+                observation=observation,
+                message=(
+                    "Unexpected project action is "
+                    "blocking the current stage."
+                ),
+                error={
+                    "expected_action": (
+                        expected_action
+                    ),
+                    "expected_target": (
+                        expected_target
+                    ),
+                    "actual_action": (
+                        action_record
+                    ),
+                },
+                job_id=None,
+            )
+
+        action_status = self._normalize(
+            action_record.get("status")
+        )
+
+        observation["project_action"] = (
+            deepcopy(action_record)
+        )
+
+        if action_status == "failed":
+            return self._transition_failed(
+                session=session,
+                state=state,
+                observation=observation,
+                message=(
+                    f"Project action "
+                    f"{expected_action} failed."
+                ),
+                error=action_record.get(
+                    "error"
+                ),
+                job_id=action_record.get(
+                    "action_id"
+                ),
+            )
+
+        if action_status == "cancelled":
+            updated = self.state_store.transition(
+                session=session,
+                new_status="cancelled",
+                expected_status=self._normalize(
+                    state.get("status")
+                ),
+                message=(
+                    f"Project action "
+                    f"{expected_action} was cancelled."
+                ),
+                active_stage=None,
+                job_id=action_record.get(
+                    "action_id"
+                ),
+                error=action_record.get(
+                    "error"
+                ),
+            )
+
+            return self._transition_result(
+                observation=observation,
+                previous_state=state,
+                updated_state=updated,
+                transition=(
+                    f"{state.get('status')}"
+                    " -> cancelled"
+                ),
+            )
+
+        return None
+
+
+    def _complete_and_clear_stage_action(
+        self,
+        session: str,
+        expected_action: str,
+        result: dict[str, Any],
+        message: str,
+    ) -> None:
+        state = self.state_store.load(
+            session
+        )
+
+        action_record = state.get(
+            "pending_action"
+        )
+
+        if not isinstance(
+            action_record,
+            dict,
+        ):
+            return
+
+        if (
+            self._normalize(
+                action_record.get("action")
+            )
+            != expected_action
+        ):
+            raise RuntimeError(
+                "The current project action does "
+                "not match the completed stage."
+            )
+
+        action_id = action_record.get(
+            "action_id"
+        )
+
+        action_status = self._normalize(
+            action_record.get("status")
+        )
+
+        if action_status not in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            self.state_store.report_pending_action(
+                session=session,
+                action_id=action_id,
+                status="completed",
+                message=message,
+                result=result,
+                error=None,
+            )
+
+        self.state_store.clear_pending_action(
+            session=session,
+            expected_action_id=(
+                action_id
+            ),
+        )
 
     # ============================================================
     # RESULT HELPERS
