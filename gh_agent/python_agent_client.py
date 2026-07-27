@@ -31,6 +31,217 @@ class PythonAgentClient:
             response = receive_message(sock)
 
         return response
+
+    def get_pending_project_action(
+        self,
+        target,
+        session=None,
+    ):
+        """
+        Requests the oldest unclaimed project action assigned
+        to this PC type.
+
+        target examples:
+            design_pc
+            motion_pc
+
+        session is optional. When omitted, the master searches
+        all persisted project pipelines.
+        """
+
+        normalized_target = str(
+            target or ""
+        ).strip().lower()
+
+        if not normalized_target:
+            raise ValueError(
+                "target cannot be empty."
+            )
+
+        payload = {
+            "command": (
+                "get_pending_project_action"
+            ),
+            "target": normalized_target,
+        }
+
+        normalized_session = str(
+            session or ""
+        ).strip()
+
+        if normalized_session:
+            payload["session"] = (
+                normalized_session
+            )
+
+        return self.send_command(
+            payload
+        )
+
+    def claim_project_action(
+        self,
+        session,
+        action_id,
+        claimed_by,
+    ):
+        """
+        Claims one pending project action on the master.
+
+        A successful claim changes the master pipeline from:
+
+            design_pending -> design_requested
+
+        or:
+
+            motion_pending -> motion_requested
+        """
+
+        normalized_session = str(
+            session or ""
+        ).strip()
+
+        normalized_action_id = str(
+            action_id or ""
+        ).strip()
+
+        normalized_claimed_by = str(
+            claimed_by or ""
+        ).strip().lower()
+
+        if not normalized_session:
+            raise ValueError(
+                "session cannot be empty."
+            )
+
+        if not normalized_action_id:
+            raise ValueError(
+                "action_id cannot be empty."
+            )
+
+        if not normalized_claimed_by:
+            raise ValueError(
+                "claimed_by cannot be empty."
+            )
+
+        payload = {
+            "command": (
+                "claim_project_action"
+            ),
+            "session": normalized_session,
+            "action_id": normalized_action_id,
+            "claimed_by": (
+                normalized_claimed_by
+            ),
+        }
+
+        return self.send_command(
+            payload
+        )
+
+    def report_project_action(
+        self,
+        session,
+        action_id,
+        action_status,
+        message="",
+        result=None,
+        error=None,
+    ):
+        """
+        Reports the local execution state of a claimed action.
+
+        Supported action_status values:
+
+            running
+            completed
+            failed
+            cancelled
+
+        A completed report does not replace the master output
+        manifest as durable stage-completion evidence.
+        """
+
+        normalized_session = str(
+            session or ""
+        ).strip()
+
+        normalized_action_id = str(
+            action_id or ""
+        ).strip()
+
+        normalized_status = str(
+            action_status or ""
+        ).strip().lower()
+
+        valid_statuses = {
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+        }
+
+        if not normalized_session:
+            raise ValueError(
+                "session cannot be empty."
+            )
+
+        if not normalized_action_id:
+            raise ValueError(
+                "action_id cannot be empty."
+            )
+
+        if normalized_status not in valid_statuses:
+            raise ValueError(
+                "action_status must be one of: "
+                + ", ".join(
+                    sorted(
+                        valid_statuses
+                    )
+                )
+                + "."
+            )
+
+        payload = {
+            "command": (
+                "report_project_action"
+            ),
+            "session": normalized_session,
+            "action_id": normalized_action_id,
+            "action_status": (
+                normalized_status
+            ),
+            "message": str(
+                message or ""
+            ),
+        }
+
+        if result is not None:
+            payload["result"] = result
+
+        if error is not None:
+            payload["error"] = error
+
+        return self.send_command(
+            payload
+        )
+
+    def get_design_project_action(
+        self,
+        session=None,
+    ):
+        return self.get_pending_project_action(
+            target="design_pc",
+            session=session,
+        )
+
+    def get_motion_project_action(
+        self,
+        session=None,
+    ):
+        return self.get_pending_project_action(
+            target="motion_pc",
+            session=session,
+        )
     
     def download_file(self, remote_file_path, local_file_path):
         
