@@ -22,3 +22,5 @@
 
 .env
 venv/
+
+.last_session

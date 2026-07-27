@@ -116,6 +116,21 @@ class CommandHandler:
                 )
             )
 
+        if command == "get_pending_project_action":
+            return self.handle_get_pending_project_action(
+                message
+            )
+
+        if command == "claim_project_action":
+            return self.handle_claim_project_action(
+                message
+            )
+
+        if command == "report_project_action":
+            return self.handle_report_project_action(
+                message
+            )
+
         return error_response(f"Unknown command: {command}")
 
     def handle_ping(self):
@@ -468,6 +483,487 @@ class CommandHandler:
             return error_response(
                 "Could not get project pipeline "
                 f"status: {exc}"
+            )
+
+    def handle_get_pending_project_action(
+        self,
+        message,
+    ):
+        target = str(
+            message.get("target") or ""
+        ).strip().lower()
+
+        if not target:
+            return error_response(
+                "Missing target."
+            )
+
+        requested_session = str(
+            message.get("session") or ""
+        ).strip()
+
+        try:
+            # -----------------------------------------------------
+            # Explicit session lookup
+            # -----------------------------------------------------
+
+            if requested_session:
+                action = (
+                    self.project_pipeline
+                    .state_store
+                    .get_pending_action(
+                        session=requested_session,
+                        target=target,
+                    )
+                )
+
+                if action is None:
+                    return ok_response(
+                        message=(
+                            "No pending project action "
+                            "was found."
+                        ),
+                        target=target,
+                        session=requested_session,
+                        action=None,
+                    )
+
+                return ok_response(
+                    message=(
+                        "Pending project action found."
+                    ),
+                    target=target,
+                    session=requested_session,
+                    action={
+                        **action,
+                        "session": requested_session,
+                    },
+                )
+
+            # -----------------------------------------------------
+            # Search all persisted pipelines
+            # -----------------------------------------------------
+
+            sessions_root = (
+                self.project_pipeline.sessions_root
+            )
+
+            if not sessions_root.is_dir():
+                return ok_response(
+                    message=(
+                        "No pending project action "
+                        "was found."
+                    ),
+                    target=target,
+                    action=None,
+                )
+
+            candidates = []
+
+            for session_path in (
+                sessions_root.iterdir()
+            ):
+                if not session_path.is_dir():
+                    continue
+
+                state_path = (
+                    session_path /
+                    "Project_Pipeline" /
+                    "project_pipeline_state.json"
+                )
+
+                if not state_path.is_file():
+                    continue
+
+                try:
+                    action = (
+                        self.project_pipeline
+                        .state_store
+                        .get_pending_action(
+                            session=(
+                                session_path.name
+                            ),
+                            target=target,
+                        )
+                    )
+                except Exception:
+                    continue
+
+                if action is None:
+                    continue
+
+                if (
+                    str(
+                        action.get("status") or ""
+                    ).strip().lower()
+                    != "pending"
+                ):
+                    # Only unclaimed actions are offered
+                    # through this endpoint.
+                    continue
+
+                candidates.append(
+                    {
+                        **action,
+                        "session": (
+                            session_path.name
+                        ),
+                    }
+                )
+
+            if not candidates:
+                return ok_response(
+                    message=(
+                        "No pending project action "
+                        "was found."
+                    ),
+                    target=target,
+                    action=None,
+                )
+
+            candidates.sort(
+                key=lambda item: (
+                    str(
+                        item.get("created_at")
+                        or ""
+                    ),
+                    str(
+                        item.get("action_id")
+                        or ""
+                    ),
+                )
+            )
+
+            selected_action = (
+                candidates[0]
+            )
+
+            return ok_response(
+                message=(
+                    "Pending project action found."
+                ),
+                target=target,
+                session=selected_action[
+                    "session"
+                ],
+                action=selected_action,
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not get pending project "
+                f"action: {exc}"
+            )
+
+
+    def handle_claim_project_action(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        action_id = str(
+            message.get("action_id") or ""
+        ).strip()
+
+        claimed_by = str(
+            message.get("claimed_by") or ""
+        ).strip().lower()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        if not action_id:
+            return error_response(
+                "Missing action_id."
+            )
+
+        if not claimed_by:
+            return error_response(
+                "Missing claimed_by."
+            )
+
+        try:
+            action = (
+                self.project_pipeline
+                .state_store
+                .claim_pending_action(
+                    session=session,
+                    action_id=action_id,
+                    claimed_by=claimed_by,
+                )
+            )
+
+            action_name = str(
+                action.get("action") or ""
+            ).strip().lower()
+
+            state = (
+                self.project_pipeline
+                .state_store
+                .load(
+                    session
+                )
+            )
+
+            current_status = str(
+                state.get("status") or ""
+            ).strip().lower()
+
+            requested_status = None
+            active_stage = None
+
+            if (
+                action_name == "run_design"
+                and current_status
+                == "design_pending"
+            ):
+                requested_status = (
+                    "design_requested"
+                )
+
+                active_stage = "design"
+
+            elif (
+                action_name == "run_motion"
+                and current_status
+                == "motion_pending"
+            ):
+                requested_status = (
+                    "motion_requested"
+                )
+
+                active_stage = "motion"
+
+            if requested_status is not None:
+                state = (
+                    self.project_pipeline
+                    .state_store
+                    .transition(
+                        session=session,
+                        new_status=requested_status,
+                        expected_status=(
+                            current_status
+                        ),
+                        message=(
+                            f"Project action "
+                            f"{action_name} was claimed "
+                            f"by {claimed_by}."
+                        ),
+                        active_stage=active_stage,
+                        job_id=action_id,
+                    )
+                )
+
+            return ok_response(
+                message=(
+                    "Project action claimed."
+                ),
+                session=session,
+                action=action,
+                project_pipeline=state,
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not claim project "
+                f"action: {exc}"
+            )
+
+    def handle_report_project_action(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        action_id = str(
+            message.get("action_id") or ""
+        ).strip()
+
+        report_status = str(
+            message.get("action_status")
+            or message.get("report_status")
+            or ""
+        ).strip().lower()
+
+        report_message = str(
+            message.get("message") or ""
+        )
+
+        result = message.get(
+            "result"
+        )
+
+        error = message.get(
+            "error"
+        )
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        if not action_id:
+            return error_response(
+                "Missing action_id."
+            )
+
+        if not report_status:
+            return error_response(
+                "Missing action_status."
+            )
+
+        try:
+            action = (
+                self.project_pipeline
+                .state_store
+                .report_pending_action(
+                    session=session,
+                    action_id=action_id,
+                    status=report_status,
+                    message=report_message,
+                    result=result,
+                    error=error,
+                )
+            )
+
+            action_name = str(
+                action.get("action") or ""
+            ).strip().lower()
+
+            state = (
+                self.project_pipeline
+                .state_store
+                .load(
+                    session
+                )
+            )
+
+            current_status = str(
+                state.get("status") or ""
+            ).strip().lower()
+
+            running_status = None
+            active_stage = None
+
+            if (
+                report_status == "running"
+                and action_name == "run_design"
+                and current_status
+                in {
+                    "design_pending",
+                    "design_requested",
+                }
+            ):
+                running_status = (
+                    "design_running"
+                )
+
+                active_stage = "design"
+
+            elif (
+                report_status == "running"
+                and action_name == "run_motion"
+                and current_status
+                in {
+                    "motion_pending",
+                    "motion_requested",
+                }
+            ):
+                running_status = (
+                    "motion_running"
+                )
+
+                active_stage = "motion"
+
+            if running_status is not None:
+                state = (
+                    self.project_pipeline
+                    .state_store
+                    .transition(
+                        session=session,
+                        new_status=running_status,
+                        expected_status=(
+                            current_status
+                        ),
+                        message=(
+                            report_message
+                            or (
+                                f"Project action "
+                                f"{action_name} is running."
+                            )
+                        ),
+                        active_stage=active_stage,
+                        job_id=action_id,
+                    )
+                )
+
+            elif report_status == "failed":
+                state = (
+                    self.project_pipeline
+                    .state_store
+                    .transition(
+                        session=session,
+                        new_status="failed",
+                        expected_status=(
+                            current_status
+                        ),
+                        message=(
+                            report_message
+                            or (
+                                f"Project action "
+                                f"{action_name} failed."
+                            )
+                        ),
+                        active_stage=None,
+                        job_id=action_id,
+                        error=error,
+                    )
+                )
+
+            elif report_status == "cancelled":
+                state = (
+                    self.project_pipeline
+                    .state_store
+                    .transition(
+                        session=session,
+                        new_status="cancelled",
+                        expected_status=(
+                            current_status
+                        ),
+                        message=(
+                            report_message
+                            or (
+                                f"Project action "
+                                f"{action_name} "
+                                "was cancelled."
+                            )
+                        ),
+                        active_stage=None,
+                        job_id=action_id,
+                        error=error,
+                    )
+                )
+
+            return ok_response(
+                message=(
+                    "Project action report accepted."
+                ),
+                session=session,
+                action=action,
+                project_pipeline=state,
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not report project "
+                f"action: {exc}"
             )
 
     # def handle_get_file_metadata(self, message):
