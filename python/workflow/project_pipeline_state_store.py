@@ -1,5 +1,6 @@
 import json
 import threading
+import uuid
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,21 @@ class ProjectPipelineStateStore:
         "failed",
         "cancelled",
         "paused",
+    }
+
+    VALID_ACTION_STATUSES = {
+        "pending",
+        "claimed",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+    }
+
+    ACTIVE_ACTION_STATUSES = {
+        "pending",
+        "claimed",
+        "running",
     }
 
     def __init__(
@@ -205,6 +221,8 @@ class ProjectPipelineStateStore:
             "robot_execution_index": None,
             "active_stage": "processing",
             "active_job_id": None,
+            "pending_action": None,
+            "action_history": [],
             "message": (
                 "Waiting for processing output."
             ),
@@ -669,6 +687,601 @@ class ProjectPipelineStateStore:
 
         return dict(state)
 
+
+    # ============================================================
+    # PROJECT ACTIONS
+    # ============================================================
+
+    def create_pending_action(
+        self,
+        session: str,
+        action: str,
+        target: str,
+        source_output_index: int,
+        expected_pipeline_status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Creates one durable action for a remote project stage.
+
+        The method is idempotent. If the same active action already
+        exists, that action is returned instead of creating a duplicate.
+        """
+
+        normalized_action = self._normalize_required_text(
+            action,
+            "action",
+        )
+
+        normalized_target = self._normalize_required_text(
+            target,
+            "target",
+        )
+
+        normalized_expected_status = (
+            self._validate_status(
+                expected_pipeline_status
+            )
+        )
+
+        normalized_source_index = (
+            self._validate_index(
+                source_output_index,
+                "source_output_index",
+            )
+        )
+
+        with self._lock:
+            state = self.load(
+                session
+            )
+
+            current_pipeline_status = str(
+                state.get("status") or ""
+            ).strip().lower()
+
+            if (
+                current_pipeline_status
+                != normalized_expected_status
+            ):
+                raise RuntimeError(
+                    "Project action creation rejected: "
+                    "expected pipeline status "
+                    f"'{normalized_expected_status}', "
+                    f"found '{current_pipeline_status}'."
+                )
+
+            existing_action = state.get(
+                "pending_action"
+            )
+
+            if isinstance(
+                existing_action,
+                dict,
+            ):
+                existing_status = str(
+                    existing_action.get(
+                        "status"
+                    ) or ""
+                ).strip().lower()
+
+                same_action = (
+                    existing_action.get("action")
+                    == normalized_action
+                    and existing_action.get("target")
+                    == normalized_target
+                    and existing_action.get(
+                        "source_output_index"
+                    )
+                    == normalized_source_index
+                )
+
+                if (
+                    existing_status
+                    in self.ACTIVE_ACTION_STATUSES
+                ):
+                    if same_action:
+                        return dict(
+                            existing_action
+                        )
+
+                    raise RuntimeError(
+                        "Another active project action "
+                        "already exists: "
+                        f"{existing_action.get('action_id')}."
+                    )
+
+            timestamp = self._utc_now()
+
+            action_id = (
+                f"{normalized_action}-"
+                f"{self._validate_session_name(session)}-"
+                f"{normalized_source_index}-"
+                f"{uuid.uuid4().hex[:8]}"
+            )
+
+            action_record = {
+                "action_id": action_id,
+                "action": normalized_action,
+                "target": normalized_target,
+                "source_output_index": (
+                    normalized_source_index
+                ),
+                "status": "pending",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "claimed_at": None,
+                "started_at": None,
+                "finished_at": None,
+                "claimed_by": None,
+                "message": (
+                    "Project action is pending."
+                ),
+                "result": None,
+                "error": None,
+                "metadata": dict(
+                    metadata or {}
+                ),
+            }
+
+            state["pending_action"] = (
+                action_record
+            )
+
+            state.setdefault(
+                "action_history",
+                [],
+            ).append(
+                self._action_history_entry(
+                    action_record=action_record,
+                    event="created",
+                    message=(
+                        "Project action created."
+                    ),
+                )
+            )
+
+            self.save(
+                session=session,
+                state=state,
+            )
+
+        return dict(
+            action_record
+        )
+
+    def get_pending_action(
+        self,
+        session: str,
+        target: str | None = None,
+    ) -> dict[str, Any] | None:
+        state = self.load(
+            session
+        )
+
+        action_record = state.get(
+            "pending_action"
+        )
+
+        if not isinstance(
+            action_record,
+            dict,
+        ):
+            return None
+
+        action_status = str(
+            action_record.get("status") or ""
+        ).strip().lower()
+
+        if (
+            action_status
+            not in self.ACTIVE_ACTION_STATUSES
+        ):
+            return None
+
+        if target is not None:
+            normalized_target = (
+                self._normalize_required_text(
+                    target,
+                    "target",
+                )
+            )
+
+            if (
+                action_record.get("target")
+                != normalized_target
+            ):
+                return None
+
+        return dict(
+            action_record
+        )
+
+    def claim_pending_action(
+        self,
+        session: str,
+        action_id: str,
+        claimed_by: str,
+    ) -> dict[str, Any]:
+        normalized_action_id = (
+            self._normalize_required_identifier(
+                action_id,
+                "action_id",
+            )
+        )
+
+        normalized_claimed_by = (
+            self._normalize_required_text(
+                claimed_by,
+                "claimed_by",
+            )
+        )
+
+        with self._lock:
+            state = self.load(
+                session
+            )
+
+            action_record = state.get(
+                "pending_action"
+            )
+
+            if not isinstance(
+                action_record,
+                dict,
+            ):
+                raise FileNotFoundError(
+                    "No pending project action exists."
+                )
+
+            if (
+                action_record.get("action_id")
+                != normalized_action_id
+            ):
+                raise RuntimeError(
+                    "Project action ID does not match "
+                    "the current pending action."
+                )
+
+            current_status = str(
+                action_record.get("status") or ""
+            ).strip().lower()
+
+            existing_claimed_by = str(
+                action_record.get(
+                    "claimed_by"
+                ) or ""
+            ).strip()
+
+            # Idempotent retry from the same agent.
+            if (
+                current_status == "claimed"
+                and existing_claimed_by
+                == normalized_claimed_by
+            ):
+                return dict(
+                    action_record
+                )
+
+            if current_status != "pending":
+                raise RuntimeError(
+                    "Project action cannot be claimed "
+                    f"from status '{current_status}'."
+                )
+
+            timestamp = self._utc_now()
+
+            action_record["status"] = (
+                "claimed"
+            )
+
+            action_record["claimed_by"] = (
+                normalized_claimed_by
+            )
+
+            action_record["claimed_at"] = (
+                timestamp
+            )
+
+            action_record["updated_at"] = (
+                timestamp
+            )
+
+            action_record["message"] = (
+                "Project action claimed."
+            )
+
+            state.setdefault(
+                "action_history",
+                [],
+            ).append(
+                self._action_history_entry(
+                    action_record=action_record,
+                    event="claimed",
+                    message=(
+                        "Project action claimed by "
+                        f"{normalized_claimed_by}."
+                    ),
+                )
+            )
+
+            self.save(
+                session=session,
+                state=state,
+            )
+
+        return dict(
+            action_record
+        )
+
+    def report_pending_action(
+        self,
+        session: str,
+        action_id: str,
+        status: str,
+        message: str = "",
+        result: Any = None,
+        error: Any = None,
+    ) -> dict[str, Any]:
+        normalized_action_id = (
+            self._normalize_required_identifier(
+                action_id,
+                "action_id",
+            )
+        )
+
+        normalized_status = str(
+            status or ""
+        ).strip().lower()
+
+        allowed_report_statuses = {
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+        }
+
+        if (
+            normalized_status
+            not in allowed_report_statuses
+        ):
+            raise ValueError(
+                "Action report status must be one of: "
+                + ", ".join(
+                    sorted(
+                        allowed_report_statuses
+                    )
+                )
+                + "."
+            )
+
+        with self._lock:
+            state = self.load(
+                session
+            )
+
+            action_record = state.get(
+                "pending_action"
+            )
+
+            if not isinstance(
+                action_record,
+                dict,
+            ):
+                raise FileNotFoundError(
+                    "No current project action exists."
+                )
+
+            if (
+                action_record.get("action_id")
+                != normalized_action_id
+            ):
+                raise RuntimeError(
+                    "Project action ID does not match "
+                    "the current project action."
+                )
+
+            current_status = str(
+                action_record.get("status") or ""
+            ).strip().lower()
+
+            valid_previous_statuses = {
+                "running": {
+                    "claimed",
+                    "running",
+                },
+                "completed": {
+                    "claimed",
+                    "running",
+                    "completed",
+                },
+                "failed": {
+                    "pending",
+                    "claimed",
+                    "running",
+                    "failed",
+                },
+                "cancelled": {
+                    "pending",
+                    "claimed",
+                    "running",
+                    "cancelled",
+                },
+            }
+
+            if (
+                current_status
+                not in valid_previous_statuses[
+                    normalized_status
+                ]
+            ):
+                raise RuntimeError(
+                    "Project action cannot transition "
+                    f"from '{current_status}' to "
+                    f"'{normalized_status}'."
+                )
+
+            # Idempotent terminal report.
+            if (
+                current_status
+                == normalized_status
+                and normalized_status
+                in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                }
+            ):
+                return dict(
+                    action_record
+                )
+
+            timestamp = self._utc_now()
+
+            action_record["status"] = (
+                normalized_status
+            )
+
+            action_record["updated_at"] = (
+                timestamp
+            )
+
+            if normalized_status == "running":
+                if (
+                    action_record.get(
+                        "started_at"
+                    )
+                    is None
+                ):
+                    action_record[
+                        "started_at"
+                    ] = timestamp
+
+            if normalized_status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                action_record["finished_at"] = (
+                    timestamp
+                )
+
+            if message:
+                action_record["message"] = str(
+                    message
+                )
+            else:
+                action_record["message"] = (
+                    "Project action "
+                    f"{normalized_status}."
+                )
+
+            action_record["result"] = (
+                result
+            )
+
+            action_record["error"] = (
+                error
+            )
+
+            state.setdefault(
+                "action_history",
+                [],
+            ).append(
+                self._action_history_entry(
+                    action_record=action_record,
+                    event=normalized_status,
+                    message=(
+                        action_record["message"]
+                    ),
+                )
+            )
+
+            self.save(
+                session=session,
+                state=state,
+            )
+
+        return dict(
+            action_record
+        )
+
+    def clear_pending_action(
+        self,
+        session: str,
+        expected_action_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Removes the current action after the pipeline has consumed its
+        completed/failed/cancelled result.
+        """
+
+        with self._lock:
+            state = self.load(
+                session
+            )
+
+            action_record = state.get(
+                "pending_action"
+            )
+
+            if not isinstance(
+                action_record,
+                dict,
+            ):
+                return None
+
+            if expected_action_id is not None:
+                normalized_action_id = (
+                    self._normalize_required_identifier(
+                        expected_action_id,
+                        "expected_action_id",
+                    )
+                )
+
+                if (
+                    action_record.get("action_id")
+                    != normalized_action_id
+                ):
+                    raise RuntimeError(
+                        "Current project action does not "
+                        "match expected_action_id."
+                    )
+
+            current_status = str(
+                action_record.get("status") or ""
+            ).strip().lower()
+
+            if current_status in self.ACTIVE_ACTION_STATUSES:
+                raise RuntimeError(
+                    "An active project action cannot "
+                    "be cleared."
+                )
+
+            state.setdefault(
+                "action_history",
+                [],
+            ).append(
+                self._action_history_entry(
+                    action_record=action_record,
+                    event="cleared",
+                    message=(
+                        "Project action cleared."
+                    ),
+                )
+            )
+
+            state["pending_action"] = None
+
+            self.save(
+                session=session,
+                state=state,
+            )
+
+        return dict(
+            action_record
+        )
+
     # ============================================================
     # INTERNAL HELPERS
     # ============================================================
@@ -753,6 +1366,16 @@ class ProjectPipelineStateStore:
         state.setdefault(
             "active_job_id",
             None,
+        )
+
+        state.setdefault(
+            "pending_action",
+            None,
+        )
+
+        state.setdefault(
+            "action_history",
+            [],
         )
 
         state.setdefault(
@@ -899,3 +1522,74 @@ class ProjectPipelineStateStore:
         return datetime.now(
             timezone.utc
         ).isoformat()
+
+    def _action_history_entry(
+        self,
+        action_record: dict[str, Any],
+        event: str,
+        message: str,
+    ) -> dict[str, Any]:
+        return {
+            "created_at": self._utc_now(),
+            "event": str(
+                event or ""
+            ).strip().lower(),
+            "action_id": action_record.get(
+                "action_id"
+            ),
+            "action": action_record.get(
+                "action"
+            ),
+            "target": action_record.get(
+                "target"
+            ),
+            "source_output_index": (
+                action_record.get(
+                    "source_output_index"
+                )
+            ),
+            "status": action_record.get(
+                "status"
+            ),
+            "claimed_by": action_record.get(
+                "claimed_by"
+            ),
+            "message": str(
+                message or ""
+            ),
+            "error": action_record.get(
+                "error"
+            ),
+        }
+
+    def _normalize_required_text(
+        self,
+        value: Any,
+        field_name: str,
+    ) -> str:
+        normalized = str(
+            value or ""
+        ).strip().lower()
+
+        if not normalized:
+            raise ValueError(
+                f"{field_name} cannot be empty."
+            )
+
+        return normalized
+
+    def _normalize_required_identifier(
+        self,
+        value: Any,
+        field_name: str,
+    ) -> str:
+        normalized = str(
+            value or ""
+        ).strip()
+
+        if not normalized:
+            raise ValueError(
+                f"{field_name} cannot be empty."
+            )
+
+        return normalized
