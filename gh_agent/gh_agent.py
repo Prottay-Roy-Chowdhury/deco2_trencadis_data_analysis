@@ -605,6 +605,212 @@ class GrasshopperAgent:
 
         return local_record
 
+
+    def consume_local_project_action(
+        self,
+    ):
+        """
+        Consumes the current locally claimed project action.
+
+        A successful consume:
+            claimed -> consumed locally
+            claimed -> running on the master
+            consumed -> running locally
+
+        Subsequent calls return trigger=False for the same action.
+        """
+
+        action = (
+            self.project_action_store
+            .get_active_action(
+                target=self.project_action_target,
+            )
+        )
+
+        if not isinstance(
+            action,
+            dict,
+        ):
+            return ok_response(
+                message=(
+                    "No active local project action."
+                ),
+                target=self.project_action_target,
+                trigger=False,
+                action=None,
+            )
+
+        action_id = str(
+            action.get("action_id") or ""
+        ).strip()
+
+        session = str(
+            action.get("session") or ""
+        ).strip()
+
+        local_status = str(
+            action.get("local_status") or ""
+        ).strip().lower()
+
+        if not action_id:
+            return error_response(
+                "Local project action is missing "
+                "action_id."
+            )
+
+        if not session:
+            return error_response(
+                "Local project action is missing "
+                "session."
+            )
+
+        # Already consumed or running:
+        # expose the action state, but do not pulse again.
+        if local_status in {
+            "consumed",
+            "running",
+        }:
+            return ok_response(
+                message=(
+                    "Project action was already consumed."
+                ),
+                target=self.project_action_target,
+                trigger=False,
+                action=action,
+            )
+
+        if local_status != "claimed":
+            return ok_response(
+                message=(
+                    "Local project action is not "
+                    "available for consumption."
+                ),
+                target=self.project_action_target,
+                trigger=False,
+                action=action,
+            )
+
+        # ---------------------------------------------------------
+        # Mark consumed before returning the trigger.
+        #
+        # This prevents repeated GH solutions from consuming the
+        # same claimed action.
+        # ---------------------------------------------------------
+
+        consumed_action = (
+            self.project_action_store
+            .mark_consumed(
+                action_id=action_id,
+                message=(
+                    "Project action consumed by "
+                    "Grasshopper."
+                ),
+            )
+        )
+
+        try:
+            report_response = (
+                self.python_client
+                .report_project_action(
+                    session=session,
+                    action_id=action_id,
+                    action_status="running",
+                    message=(
+                        "Grasshopper consumed the "
+                        "project action."
+                    ),
+                )
+            )
+
+            if (
+                report_response.get("status")
+                != "ok"
+            ):
+                self.write_log(
+                    "Project action was consumed "
+                    "locally, but running status "
+                    "could not be reported: "
+                    f"{report_response.get('message')}"
+                )
+
+                return ok_response(
+                    message=(
+                        "Project action consumed locally, "
+                        "but the master running report "
+                        "was not accepted."
+                    ),
+                    target=self.project_action_target,
+                    trigger=True,
+                    action=consumed_action,
+                    master_report=report_response,
+                )
+
+            running_action = (
+                self.project_action_store
+                .mark_running_reported(
+                    action_id=action_id,
+                    message=(
+                        "Running status reported "
+                        "to master."
+                    ),
+                )
+            )
+
+            self.write_log(
+                "Project action consumed and "
+                "reported running: "
+                f"action_id={action_id}, "
+                f"session={session}, "
+                f"target={self.project_action_target}"
+            )
+
+            self.set_latest(
+                job_id=action_id,
+                status="project_action_running",
+                message=(
+                    "Project action consumed by "
+                    "Grasshopper and reported running."
+                ),
+                result=running_action,
+                clear_error=True,
+            )
+
+            return ok_response(
+                message=(
+                    "Project action consumed and "
+                    "reported running."
+                ),
+                target=self.project_action_target,
+                trigger=True,
+                action=running_action,
+                master_report=report_response,
+            )
+
+        except Exception as exc:
+            error_text = traceback.format_exc()
+
+            self.write_log(
+                "Project action running report "
+                "failed:\n"
+                f"{error_text}"
+            )
+
+            # The action remains consumed locally. This avoids
+            # issuing the same physical/GH trigger twice.
+            return ok_response(
+                message=(
+                    "Project action consumed locally, "
+                    "but reporting to the master failed."
+                ),
+                target=self.project_action_target,
+                trigger=True,
+                action=consumed_action,
+                master_report={
+                    "status": "error",
+                    "message": str(exc),
+                },
+            )
+
     def submit_python_job(self, payload):
         response = self.python_client.send_command(payload)
 
@@ -3533,6 +3739,11 @@ class GrasshopperAgent:
                 "command": "list_workflows",
                 "session": session,
             })
+
+        if command == "consume_local_project_action":
+            return (
+                self.consume_local_project_action()
+            )
 
         if command == "get_local_project_action":
             action = (
