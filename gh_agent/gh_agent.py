@@ -14,7 +14,8 @@ from gh_agent.config import (
     POLL_INTERVAL_SEC,
     LOG_DIR,
     GH_AGENT_LOG_FILE,
-    RECEIVED_ROOT
+    RECEIVED_ROOT,
+    LOCAL_RECEIVED_ROOT,
 )
 
 from gh_agent.protocol import (
@@ -26,6 +27,9 @@ from gh_agent.protocol import (
 
 from gh_agent.python_agent_client import PythonAgentClient
 from gh_agent.local_upload_store import LocalUploadStore
+from gh_agent.project_action_store import (
+    ProjectActionStore,
+)
 
 
 class GrasshopperAgent:
@@ -37,6 +41,11 @@ class GrasshopperAgent:
         self.port = port
         self.python_client = PythonAgentClient()
         self.local_upload_store = LocalUploadStore()
+        self.project_action_store = (
+            ProjectActionStore(
+                root=LOCAL_RECEIVED_ROOT,
+            )
+        )
         self.running = False
 
         self.lock = threading.Lock()
