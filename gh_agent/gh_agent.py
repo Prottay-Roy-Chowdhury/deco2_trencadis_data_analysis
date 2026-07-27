@@ -76,6 +76,16 @@ class GrasshopperAgent:
                 root=project_action_root,
             )
         )
+
+        self.project_action_poll_stop = (
+            threading.Event()
+        )
+
+        self.project_action_poll_thread = None
+
+        self.project_action_poll_lock = (
+            threading.Lock()
+        )
         self.running = False
 
         self.lock = threading.Lock()
@@ -317,6 +327,283 @@ class GrasshopperAgent:
                 self.write_log(f"Polling error for job {job_id}: {e}")
 
             time.sleep(POLL_INTERVAL_SEC)
+
+    def start_project_action_poller(
+        self,
+    ):
+        """
+        Starts one background project-action poller for this
+        GH Agent role.
+        """
+
+        with self.project_action_poll_lock:
+            if (
+                self.project_action_poll_thread
+                is not None
+                and self.project_action_poll_thread
+                .is_alive()
+            ):
+                return False
+
+            self.project_action_poll_stop.clear()
+
+            self.project_action_poll_thread = (
+                threading.Thread(
+                    target=(
+                        self.poll_project_actions
+                    ),
+                    name=(
+                        "project-action-poller-"
+                        f"{self.project_action_target}"
+                    ),
+                    daemon=True,
+                )
+            )
+
+            self.project_action_poll_thread.start()
+
+        self.write_log(
+            "Project action poller started: "
+            f"target={self.project_action_target}"
+        )
+
+        return True
+
+
+    def stop_project_action_poller(
+        self,
+        join_timeout_sec=2.0,
+    ):
+        """
+        Stops the background project-action poller.
+        """
+
+        with self.project_action_poll_lock:
+            thread = (
+                self.project_action_poll_thread
+            )
+
+            if (
+                thread is None
+                or not thread.is_alive()
+            ):
+                self.project_action_poll_thread = None
+                return False
+
+            self.project_action_poll_stop.set()
+
+        thread.join(
+            timeout=max(
+                0.0,
+                float(join_timeout_sec),
+            )
+        )
+
+        with self.project_action_poll_lock:
+            if not thread.is_alive():
+                self.project_action_poll_thread = (
+                    None
+                )
+
+        self.write_log(
+            "Project action poller stopped: "
+            f"target={self.project_action_target}"
+        )
+
+        return True
+
+    def poll_project_actions(
+        self,
+    ):
+        """
+        Polls the Python master for unclaimed actions matching
+        this agent's role.
+
+        The poller does nothing while a local action is active.
+        """
+
+        while (
+            self.running
+            and not self.project_action_poll_stop.is_set()
+        ):
+            try:
+                self.poll_project_action_once()
+
+            except Exception:
+                error_text = traceback.format_exc()
+
+                self.write_log(
+                    "Project action polling error:\n"
+                    f"{error_text}"
+                )
+
+            self.project_action_poll_stop.wait(
+                POLL_INTERVAL_SEC
+            )
+
+    def poll_project_action_once(
+        self,
+    ):
+        """
+        Performs one project-action polling cycle.
+
+        Returns the current local action, a newly claimed action,
+        or None when no action is available.
+        """
+
+        # ---------------------------------------------------------
+        # Do not claim another action while one is active locally.
+        # ---------------------------------------------------------
+
+        local_action = (
+            self.project_action_store
+            .get_active_action(
+                target=(
+                    self.project_action_target
+                )
+            )
+        )
+
+        if local_action is not None:
+            return local_action
+
+        # ---------------------------------------------------------
+        # Ask the master for one pending action for this role.
+        # ---------------------------------------------------------
+
+        pending_response = (
+            self.python_client
+            .get_pending_project_action(
+                target=(
+                    self.project_action_target
+                )
+            )
+        )
+
+        if pending_response.get("status") != "ok":
+            self.write_log(
+                "Could not poll project actions: "
+                f"{pending_response.get('message')}"
+            )
+
+            return None
+
+        action = pending_response.get(
+            "action"
+        )
+
+        if not isinstance(
+            action,
+            dict,
+        ):
+            return None
+
+        session = str(
+            action.get("session")
+            or pending_response.get("session")
+            or ""
+        ).strip()
+
+        action_id = str(
+            action.get("action_id") or ""
+        ).strip()
+
+        if not session:
+            raise ValueError(
+                "Pending project action is missing "
+                "its session."
+            )
+
+        if not action_id:
+            raise ValueError(
+                "Pending project action is missing "
+                "its action_id."
+            )
+
+        action_target = str(
+            action.get("target") or ""
+        ).strip().lower()
+
+        if (
+            action_target
+            != self.project_action_target
+        ):
+            raise RuntimeError(
+                "Master returned an action for the "
+                "wrong target: "
+                f"expected={self.project_action_target}, "
+                f"actual={action_target}."
+            )
+
+        # ---------------------------------------------------------
+        # Claim the action on the master.
+        # ---------------------------------------------------------
+
+        claim_response = (
+            self.python_client
+            .claim_project_action(
+                session=session,
+                action_id=action_id,
+                claimed_by=(
+                    self.project_action_target
+                ),
+            )
+        )
+
+        if claim_response.get("status") != "ok":
+            self.write_log(
+                "Could not claim project action "
+                f"{action_id}: "
+                f"{claim_response.get('message')}"
+            )
+
+            return None
+
+        claimed_action = claim_response.get(
+            "action"
+        )
+
+        if not isinstance(
+            claimed_action,
+            dict,
+        ):
+            raise RuntimeError(
+                "Master accepted the project action "
+                "claim but returned no action record."
+            )
+
+        # ---------------------------------------------------------
+        # Persist the claimed action locally.
+        # ---------------------------------------------------------
+
+        local_record = (
+            self.project_action_store
+            .save_claimed_action(
+                session=session,
+                action=claimed_action,
+            )
+        )
+
+        self.write_log(
+            "Project action claimed and stored: "
+            f"action_id={action_id}, "
+            f"action={local_record.get('action')}, "
+            f"session={session}, "
+            f"target={self.project_action_target}"
+        )
+
+        self.set_latest(
+            job_id=action_id,
+            status="project_action_claimed",
+            message=(
+                "Project action claimed and "
+                "stored locally."
+            ),
+            result=local_record,
+            clear_error=True,
+        )
+
+        return local_record
 
     def submit_python_job(self, payload):
         response = self.python_client.send_command(payload)
@@ -3247,6 +3534,28 @@ class GrasshopperAgent:
                 "session": session,
             })
 
+        if command == "get_local_project_action":
+            action = (
+                self.project_action_store
+                .get_active_action(
+                    target=(
+                        self.project_action_target
+                    )
+                )
+            )
+
+            return ok_response(
+                message=(
+                    "Local project action loaded."
+                    if action is not None
+                    else "No active local project action."
+                ),
+                target=(
+                    self.project_action_target
+                ),
+                action=action,
+            )
+
         return error_response(f"Unknown GH Agent command: {command}")
 
     def start(self):
@@ -3257,6 +3566,7 @@ class GrasshopperAgent:
         print("[gh-agent] Press Ctrl+C to stop.")
 
         self.running = True
+        self.start_project_action_poller()
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -3292,12 +3602,28 @@ class GrasshopperAgent:
 
             finally:
                 self.running = False
-                print("[gh-agent] Shutting down...")
 
+                try:
+                    self.stop_project_action_poller(
+                        join_timeout_sec=2.0
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+                print(
+                    "[gh-agent] Shutting down..."
+                )
+
+
+# def main():
+#     agent = GrasshopperAgent()
+#     agent.start()
 
 def main():
-    agent = GrasshopperAgent()
-    agent.start()
+    raise RuntimeError(
+        "Use start_design_gh_agent.py or "
+        "start_motion_gh_agent.py."
+    )
 
 
 if __name__ == "__main__":
