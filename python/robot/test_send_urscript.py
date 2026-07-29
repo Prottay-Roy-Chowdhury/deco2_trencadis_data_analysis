@@ -24,7 +24,7 @@ from robot.ur_robot_client import (
 ROBOT_IP = "192.168.56.101"
 
 SCRIPT_PATH = Path(
-    r"F:\path\to\motion_script_01.script"
+    r"C:\\Users\\Usuario\\Downloads\\test02.script"
 )
 
 

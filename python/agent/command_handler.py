@@ -183,9 +183,60 @@ class CommandHandler:
                 runtime=runtime,
             )
 
+            # ---------------------------------------------------------
+            # Initialize the project pipeline immediately after the
+            # workflow record and workflow manifest have been created.
+            #
+            # This creates:
+            #
+            #     <session>/Project_Pipeline/
+            #         project_pipeline_state.json
+            #
+            # The initial pipeline status remains:
+            #
+            #     waiting_for_processing
+            #
+            # The ProjectPipelineMonitor will then detect and evaluate
+            # this session automatically.
+            # ---------------------------------------------------------
+
+            normalized_session = str(
+                workflow.get("session")
+                or session
+            ).strip()
+
+            workflow_id = str(
+                workflow.get("workflow_id")
+                or ""
+            ).strip()
+
+            if not self.project_pipeline.state_store.exists(
+                normalized_session
+            ):
+                self.project_pipeline.initialize_session(
+                    session=normalized_session,
+                    workflow_id=workflow_id,
+                    processing_output_index=None,
+                    overwrite=False,
+                    metadata={
+                        "workflow_name": workflow.get(
+                            "workflow_name"
+                        ),
+                        "workflow_version": workflow.get(
+                            "workflow_version"
+                        ),
+                        "initialized_by": (
+                            "workflow_submission"
+                        ),
+                    },
+                )
+
             return ok_response(
                 workflow_id=workflow["workflow_id"],
-                message="Workflow submitted.",
+                message=(
+                    "Workflow submitted and project "
+                    "pipeline initialized."
+                ),
                 workflow=workflow,
             )
 
