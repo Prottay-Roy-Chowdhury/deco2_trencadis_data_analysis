@@ -1049,12 +1049,74 @@ class ProjectPipelineOrchestrator:
         workflow_record: dict[str, Any],
     ) -> int | None:
         """
-        Attempts to discover the processing output index from persisted
-        workflow context without depending on one exact executor schema.
+        Extracts the processing output index from the finished
+        processing stage.
 
-        Explicit state/configuration remains preferred.
+        The processing executor stores its result under:
+
+            stage_states["process"]["result"]
+
+        Depending on the executor version, the index may be named:
+
+            processing_output_index
+            processing_index
+            output_index
         """
 
+        stage_states = workflow_record.get(
+            "stage_states",
+            {},
+        )
+
+        if isinstance(stage_states, dict):
+            process_state = stage_states.get(
+                "process",
+                {},
+            )
+
+            if isinstance(process_state, dict):
+                process_result = process_state.get(
+                    "result",
+                    {},
+                )
+
+                if isinstance(process_result, dict):
+                    for key in (
+                        "processing_output_index",
+                        "processing_index",
+                        "output_index",
+                    ):
+                        value = (
+                            self._positive_integer_or_none(
+                                process_result.get(key)
+                            )
+                        )
+
+                        if value is not None:
+                            return value
+
+                    artifacts = process_result.get(
+                        "artifacts",
+                        {},
+                    )
+
+                    if isinstance(artifacts, dict):
+                        for key in (
+                            "processing_output_index",
+                            "processing_index",
+                            "output_index",
+                        ):
+                            value = (
+                                self._positive_integer_or_none(
+                                    artifacts.get(key)
+                                )
+                            )
+
+                            if value is not None:
+                                return value
+
+        # Preserve the existing fallback for workflow contexts that
+        # explicitly expose a processing-specific index.
         preferred_keys = {
             "processing_output_index",
             "processing_index",
@@ -1063,7 +1125,7 @@ class ProjectPipelineOrchestrator:
         value = self._find_integer_by_keys(
             workflow_record.get(
                 "context",
-                {}
+                {},
             ),
             preferred_keys,
         )
@@ -1072,10 +1134,7 @@ class ProjectPipelineOrchestrator:
             return value
 
         value = self._find_integer_by_keys(
-            workflow_record.get(
-                "stage_states",
-                {}
-            ),
+            stage_states,
             preferred_keys,
         )
 
