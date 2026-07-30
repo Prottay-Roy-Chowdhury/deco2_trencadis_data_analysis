@@ -811,6 +811,161 @@ class GrasshopperAgent:
                 },
             )
 
+    def finish_local_project_action(
+        self,
+        status: str,
+        message: str = "",
+        result=None,
+        error=None,
+        action_id: str | None = None,
+    ):
+        """
+        Marks the current local project action as terminal.
+
+        The Python Master has already been updated by the upload
+        pipeline, so this method only updates current_action.json.
+        """
+
+        normalized_status = str(
+            status or ""
+        ).strip().lower()
+
+        if normalized_status not in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            return error_response(
+                "Project action terminal status must be "
+                "completed, failed, or cancelled."
+            )
+
+        local_action = (
+            self.project_action_store
+            .load(
+                required=False,
+            )
+        )
+
+        if not isinstance(
+            local_action,
+            dict,
+        ):
+            return error_response(
+                "No local project action exists."
+            )
+
+        stored_action_id = str(
+            local_action.get("action_id")
+            or ""
+        ).strip()
+
+        requested_action_id = str(
+            action_id or stored_action_id
+        ).strip()
+
+        if not stored_action_id:
+            return error_response(
+                "Local project action is missing action_id."
+            )
+
+        if requested_action_id != stored_action_id:
+            return error_response(
+                "Requested action_id does not match the "
+                "current local project action."
+            )
+
+        current_status = str(
+            local_action.get("local_status")
+            or ""
+        ).strip().lower()
+
+        if current_status == normalized_status:
+            return ok_response(
+                message=(
+                    "Project action already "
+                    f"{normalized_status}."
+                ),
+                target=self.project_action_target,
+                action=local_action,
+            )
+
+        if current_status not in {
+            "claimed",
+            "consumed",
+            "running",
+        }:
+            return error_response(
+                "Local project action cannot become "
+                f"{normalized_status} from status "
+                f"'{current_status}'."
+            )
+
+        terminal_message = (
+            str(message).strip()
+            if str(message or "").strip()
+            else (
+                "Project action "
+                f"{normalized_status}."
+            )
+        )
+
+        try:
+
+            terminal_action = (
+                self.project_action_store
+                .mark_terminal(
+                    action_id=stored_action_id,
+                    status=normalized_status,
+                    message=terminal_message,
+                    result=result,
+                    error=error,
+                )
+            )
+
+            self.write_log(
+                "Local project action marked "
+                f"{normalized_status}: "
+                f"{stored_action_id}"
+            )
+
+            self.set_latest(
+                job_id=stored_action_id,
+                status=(
+                    "project_action_"
+                    f"{normalized_status}"
+                ),
+                message=terminal_message,
+                result=terminal_action,
+                error=error,
+                clear_error=(
+                    normalized_status
+                    == "completed"
+                ),
+            )
+
+            return ok_response(
+                message=terminal_message,
+                target=self.project_action_target,
+                action=terminal_action,
+            )
+
+        except Exception as exc:
+
+            error_text = traceback.format_exc()
+
+            self.write_log(
+                "Failed to mark local project action "
+                "terminal:\n"
+                f"{error_text}"
+            )
+
+            return error_response(
+                str(exc),
+                target=self.project_action_target,
+                action=local_action,
+            )
+
     def submit_python_job(self, payload):
         response = self.python_client.send_command(payload)
 
@@ -3745,13 +3900,35 @@ class GrasshopperAgent:
                 self.consume_local_project_action()
             )
 
+        if command == "finish_local_project_action":
+            return self.finish_local_project_action(
+                status=message.get(
+                    "action_status",
+                    message.get(
+                        "status",
+                        "completed",
+                    ),
+                ),
+                message=message.get(
+                    "message",
+                    "",
+                ),
+                result=message.get(
+                    "result",
+                ),
+                error=message.get(
+                    "error",
+                ),
+                action_id=message.get(
+                    "action_id",
+                ),
+            )
+
         if command == "get_local_project_action":
             action = (
                 self.project_action_store
                 .get_active_action(
-                    target=(
-                        self.project_action_target
-                    )
+                    target=self.project_action_target
                 )
             )
 
@@ -3761,9 +3938,7 @@ class GrasshopperAgent:
                     if action is not None
                     else "No active local project action."
                 ),
-                target=(
-                    self.project_action_target
-                ),
+                target=self.project_action_target,
                 action=action,
             )
 
