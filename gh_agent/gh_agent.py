@@ -27,7 +27,7 @@ from gh_agent.protocol import (
 
 from gh_agent.python_agent_client import PythonAgentClient
 from gh_agent.local_upload_store import LocalUploadStore
-from gh_agent.project_action_store import (
+from gh_agent.project_action_store_T import (
     ProjectActionStore,
 )
 
@@ -2789,6 +2789,20 @@ class GrasshopperAgent:
                     "design_output_index must be at least 1."
                 )
 
+            try:
+                solution_index = int(
+                    message.get("solution_index")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "solution_index must be an integer."
+                ) from exc
+
+            if solution_index < 1:
+                raise ValueError(
+                    "solution_index must be at least 1."
+                )
+
             source_processing_output_index = (
                 message.get(
                     "source_processing_output_index"
@@ -2945,6 +2959,7 @@ class GrasshopperAgent:
                 session=session,
                 design_output_index=design_output_index,
                 files=prepared_files,
+                solution_index=solution_index,
                 source_processing_output_index=(
                     source_processing_output_index
                 ),
@@ -3026,6 +3041,7 @@ class GrasshopperAgent:
 
             final_result = {
                 "session": session,
+                "solution_index": solution_index,
                 "design_output_index": design_output_index,
                 "source_processing_output_index": (
                     source_processing_output_index
@@ -3082,19 +3098,19 @@ class GrasshopperAgent:
 
             print(error_text)
 
-        if session and registered_filenames:
-            try:
-                self.local_upload_store.update_files_status(
-                    session=session,
-                    filenames=registered_filenames,
-                    upload_status="failed",
-                    error=error_text,
-                )
-            except Exception as manifest_exc:
-                self.write_log(
-                    "Could not update local upload manifest "
-                    f"after failure: {manifest_exc}"
-                )
+            if session and registered_filenames:
+                try:
+                    self.local_upload_store.update_files_status(
+                        session=session,
+                        filenames=registered_filenames,
+                        upload_status="failed",
+                        error=error_text,
+                    )
+                except Exception as manifest_exc:
+                    self.write_log(
+                        "Could not update local upload manifest "
+                        f"after failure: {manifest_exc}"
+                    )
 
     def start_motion_upload_job(
         self,
@@ -3183,6 +3199,20 @@ class GrasshopperAgent:
                 raise ValueError(
                     "motion_output_index "
                     "must be at least 1."
+                )
+
+            try:
+                solution_index = int(
+                    message.get("solution_index")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "solution_index must be an integer."
+                ) from exc
+
+            if solution_index < 1:
+                raise ValueError(
+                    "solution_index must be at least 1."
                 )
 
             source_design_output_index = (
@@ -3366,6 +3396,7 @@ class GrasshopperAgent:
                         motion_output_index
                     ),
                     files=prepared_files,
+                    solution_index=solution_index,
                     source_design_output_index=(
                         source_design_output_index
                     ),
@@ -3465,6 +3496,7 @@ class GrasshopperAgent:
 
             final_result = {
                 "session": session,
+                "solution_index": solution_index,
                 "motion_output_index": (
                     motion_output_index
                 ),

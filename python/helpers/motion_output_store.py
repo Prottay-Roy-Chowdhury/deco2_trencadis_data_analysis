@@ -166,6 +166,8 @@ class MotionOutputStore:
         self,
         session: str,
         motion_output_index: int,
+        *,
+        solution_index: int,
         source_design_output_index: int | None = None,
         message: str = "",
         created_by: str = "motion_pc",
@@ -180,6 +182,11 @@ class MotionOutputStore:
         motion_index = self._validate_index(
             motion_output_index,
             "motion_output_index",
+        )
+
+        solution_index = self._validate_index(
+            solution_index,
+            "solution_index",
         )
 
         source_index = None
@@ -210,6 +217,7 @@ class MotionOutputStore:
 
         entry = {
             "motion_output_index": motion_index,
+            "solution_index": solution_index,
             "source_design_output_index": source_index,
             "status": "uploading",
             "created_by": (
@@ -233,6 +241,7 @@ class MotionOutputStore:
         return {
             "session": str(session).strip(),
             "motion_output_index": motion_index,
+            "solution_index": solution_index,
             "output_folder": str(output_folder),
             "manifest_path": str(
                 self.get_manifest_path(session)

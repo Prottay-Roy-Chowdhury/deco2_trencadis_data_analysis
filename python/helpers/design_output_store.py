@@ -149,6 +149,8 @@ class DesignOutputStore:
         session: str,
         design_output_index: int,
         source_processing_output_index: int | None = None,
+        *,
+        solution_index: int,
         message: str = "",
         created_by: str = "design_pc",
     ) -> dict[str, Any]:
@@ -161,6 +163,11 @@ class DesignOutputStore:
         design_index = self._validate_index(
             design_output_index,
             "design_output_index",
+        )
+
+        solution_index = self._validate_index(
+            solution_index,
+            "solution_index",
         )
 
         source_index = None
@@ -191,6 +198,7 @@ class DesignOutputStore:
 
         entry = {
             "design_output_index": design_index,
+            "solution_index": solution_index,
             "source_processing_output_index": source_index,
             "status": "uploading",
             "created_by": str(created_by).strip() or "design_pc",
@@ -207,6 +215,7 @@ class DesignOutputStore:
         return {
             "session": str(session).strip(),
             "design_output_index": design_index,
+            "solution_index": solution_index,
             "output_folder": str(output_folder),
             "manifest_path": str(
                 self.get_manifest_path(session)

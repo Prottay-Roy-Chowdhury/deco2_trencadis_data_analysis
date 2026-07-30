@@ -211,18 +211,19 @@ class MotionFileReceiver:
             )
         )
 
-        upload_state = (
-            self.store.begin_upload(
-                session=session,
-                motion_output_index=(
-                    motion_output_index
-                ),
-                source_design_output_index=(
-                    source_design_output_index
-                ),
-                message=message,
-                created_by=created_by,
-            )
+        solution_index = request.get("solution_index")
+
+        upload_state = self.store.begin_upload(
+            session=session,
+            motion_output_index=(
+                motion_output_index
+            ),
+            solution_index=solution_index,
+            source_design_output_index=(
+                source_design_output_index
+            ),
+            message=message,
+            created_by=created_by,
         )
 
         output_folder = Path(
@@ -243,6 +244,7 @@ class MotionFileReceiver:
                 "motion_output_index": int(
                     motion_output_index
                 ),
+                "solution_index": int(solution_index),
                 "file_count": len(
                     validated_files
                 ),

@@ -167,9 +167,12 @@ class DesignFileReceiver:
 
         validated_files = self._validate_files(files)
 
+        solution_index = request.get("solution_index")
+
         upload_state = self.store.begin_upload(
             session=session,
             design_output_index=design_output_index,
+            solution_index=solution_index,
             source_processing_output_index=(
                 source_processing_output_index
             ),
@@ -265,6 +268,7 @@ class DesignFileReceiver:
                         "Design output uploaded successfully."
                     ),
                     "session": session,
+                    "solution_index": int(solution_index),
                     "design_output_index": int(
                         design_output_index
                     ),

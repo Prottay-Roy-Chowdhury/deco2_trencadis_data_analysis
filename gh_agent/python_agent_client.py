@@ -280,14 +280,16 @@ class PythonAgentClient:
             }
         
     def upload_design_output(
-                self,
-                session,
-                design_output_index,
-                files,
-                source_processing_output_index=None,
-                created_by="design_pc",
-                message="",
-            ):
+        self,
+        session,
+        design_output_index,
+        files,
+        *,
+        solution_index,
+        source_processing_output_index=None,
+        created_by="design_pc",
+        message="",
+    ):
                 """
                 Uploads local design files to the Python master.
     
@@ -322,6 +324,18 @@ class PythonAgentClient:
                 if not isinstance(files, list) or not files:
                     raise ValueError(
                         "files must be a non-empty list."
+                    )
+
+                try:
+                    solution_index = int(solution_index)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "solution_index must be an integer."
+                    ) from exc
+
+                if solution_index < 1:
+                    raise ValueError(
+                        "solution_index must be at least 1."
                     )
     
                 prepared_files = []
@@ -363,6 +377,7 @@ class PythonAgentClient:
                     "command": "upload_design_output",
                     "session": str(session).strip(),
                     "design_output_index": design_index,
+                    "solution_index": solution_index,
                     "created_by": str(created_by or "design_pc"),
                     "message": str(message or ""),
                     "files": [
@@ -417,6 +432,8 @@ class PythonAgentClient:
         session,
         motion_output_index,
         files,
+        *,
+        solution_index,
         source_design_output_index=None,
         created_by="motion_pc",
         message="",
@@ -481,6 +498,18 @@ class PythonAgentClient:
                 "files must be a non-empty list."
             )
 
+        try:
+            solution_index = int(solution_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "solution_index must be an integer."
+            ) from exc
+
+        if solution_index < 1:
+            raise ValueError(
+                "solution_index must be at least 1."
+            )
+
         prepared_files = []
 
         for index, file_record in enumerate(files):
@@ -521,6 +550,7 @@ class PythonAgentClient:
             "command": "upload_motion_output",
             "session": str(session).strip(),
             "motion_output_index": motion_index,
+            "solution_index": solution_index,
             "created_by": str(
                 created_by or "motion_pc"
             ).strip(),

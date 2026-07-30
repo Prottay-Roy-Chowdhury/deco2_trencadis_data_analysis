@@ -9,7 +9,7 @@ from workflow.bootstrap import (
     build_default_workflow_manager,
 )
 
-from workflow.project_pipeline_orchestrator import (
+from workflow.project_pipeline_orchestrator_T import (
     ProjectPipelineOrchestrator,
 )
 
@@ -152,6 +152,99 @@ class CommandHandler:
         return ok_response(jobs=self.jobs.list_jobs())
     
     # for Workflow manager
+    # def handle_submit_workflow(self, message):
+    #     workflow_name = message.get("workflow_name")
+    #     session = message.get("session")
+
+    #     if not workflow_name:
+    #         return error_response("Missing workflow_name.")
+
+    #     if not session:
+    #         return error_response("Missing session.")
+
+    #     stage_configs = message.get("stage_configs", {})
+    #     selected_stages = message.get("selected_stages")
+    #     start_stage = message.get("start_stage")
+    #     runtime = message.get("runtime", {})
+
+    #     if not isinstance(stage_configs, dict):
+    #         return error_response("stage_configs must be an object.")
+
+    #     if not isinstance(runtime, dict):
+    #         return error_response("runtime must be an object.")
+
+    #     try:
+    #         workflow = self.workflows.submit_workflow(
+    #             workflow_name=workflow_name,
+    #             session=session,
+    #             stage_configs=stage_configs,
+    #             selected_stages=selected_stages,
+    #             start_stage=start_stage,
+    #             runtime=runtime,
+    #         )
+
+    #         # ---------------------------------------------------------
+    #         # Initialize the project pipeline immediately after the
+    #         # workflow record and workflow manifest have been created.
+    #         #
+    #         # This creates:
+    #         #
+    #         #     <session>/Project_Pipeline/
+    #         #         project_pipeline_state.json
+    #         #
+    #         # The initial pipeline status remains:
+    #         #
+    #         #     waiting_for_processing
+    #         #
+    #         # The ProjectPipelineMonitor will then detect and evaluate
+    #         # this session automatically.
+    #         # ---------------------------------------------------------
+
+    #         normalized_session = str(
+    #             workflow.get("session")
+    #             or session
+    #         ).strip()
+
+    #         workflow_id = str(
+    #             workflow.get("workflow_id")
+    #             or ""
+    #         ).strip()
+
+    #         if not self.project_pipeline.state_store.exists(
+    #             normalized_session
+    #         ):
+    #             self.project_pipeline.initialize_session(
+    #                 session=normalized_session,
+    #                 workflow_id=workflow_id,
+    #                 processing_output_index=None,
+    #                 overwrite=False,
+    #                 metadata={
+    #                     "workflow_name": workflow.get(
+    #                         "workflow_name"
+    #                     ),
+    #                     "workflow_version": workflow.get(
+    #                         "workflow_version"
+    #                     ),
+    #                     "initialized_by": (
+    #                         "workflow_submission"
+    #                     ),
+    #                 },
+    #             )
+
+    #         return ok_response(
+    #             workflow_id=workflow["workflow_id"],
+    #             message=(
+    #                 "Workflow submitted and project "
+    #                 "pipeline initialized."
+    #             ),
+    #             workflow=workflow,
+    #         )
+
+    #     except Exception as e:
+    #         return error_response(
+    #             message=f"Could not submit workflow: {e}"
+    #         )
+
     def handle_submit_workflow(self, message):
         workflow_name = message.get("workflow_name")
         session = message.get("session")
@@ -168,10 +261,35 @@ class CommandHandler:
         runtime = message.get("runtime", {})
 
         if not isinstance(stage_configs, dict):
-            return error_response("stage_configs must be an object.")
+            return error_response(
+                "stage_configs must be an object."
+            )
 
         if not isinstance(runtime, dict):
-            return error_response("runtime must be an object.")
+            return error_response(
+                "runtime must be an object."
+            )
+
+        requested_solution_count = runtime.get(
+            "requested_solution_count",
+            1,
+        )
+
+        try:
+            requested_solution_count = int(
+                requested_solution_count
+            )
+        except (TypeError, ValueError):
+            return error_response(
+                "runtime.requested_solution_count "
+                "must be an integer."
+            )
+
+        if requested_solution_count < 1:
+            return error_response(
+                "runtime.requested_solution_count "
+                "must be at least 1."
+            )
 
         try:
             workflow = self.workflows.submit_workflow(
@@ -182,23 +300,6 @@ class CommandHandler:
                 start_stage=start_stage,
                 runtime=runtime,
             )
-
-            # ---------------------------------------------------------
-            # Initialize the project pipeline immediately after the
-            # workflow record and workflow manifest have been created.
-            #
-            # This creates:
-            #
-            #     <session>/Project_Pipeline/
-            #         project_pipeline_state.json
-            #
-            # The initial pipeline status remains:
-            #
-            #     waiting_for_processing
-            #
-            # The ProjectPipelineMonitor will then detect and evaluate
-            # this session automatically.
-            # ---------------------------------------------------------
 
             normalized_session = str(
                 workflow.get("session")
@@ -231,8 +332,18 @@ class CommandHandler:
                     },
                 )
 
+                self.project_pipeline.state_store.configure_solution_count(
+                    session=normalized_session,
+                    requested_solution_count=(
+                        requested_solution_count
+                    ),
+                )
+
             return ok_response(
                 workflow_id=workflow["workflow_id"],
+                requested_solution_count=(
+                    requested_solution_count
+                ),
                 message=(
                     "Workflow submitted and project "
                     "pipeline initialized."
