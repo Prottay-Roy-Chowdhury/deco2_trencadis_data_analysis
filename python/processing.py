@@ -28,6 +28,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.mixture import GaussianMixture
 from skimage.feature import peak_local_max
 from skimage.segmentation import watershed
+from skimage.morphology import h_maxima
 
 # Project-local helpers
 from helpers.session_manager import load_session
@@ -1262,11 +1263,132 @@ def estimate_median_spacing(pcd, sample_size=5000):
 
     return float(np.median(distances))
 
+def is_real_touching_split(
+    sub_labels,
+    distance_map,
+    neck_ratio_threshold=0.55,
+    boundary_dilation=1
+):
+    """
+    Checks whether a watershed split passes through a genuinely narrow neck.
+
+    Parameters
+    ----------
+    sub_labels : np.ndarray
+        Watershed result for one original region.
+        Background is 0; proposed pieces have labels 1, 2, 3, ...
+
+    distance_map : np.ndarray
+        Distance transform used to produce the watershed result.
+
+    neck_ratio_threshold : float
+        Maximum allowed neck-to-interior radius ratio.
+
+        Lower values are stricter:
+            0.40 = accept only very narrow connections
+            0.55 = recommended starting value
+            0.70 = more permissive
+
+    boundary_dilation : int
+        Number of pixels used to locate the contact zone between
+        neighboring watershed regions.
+
+    Returns
+    -------
+    bool
+        True when at least one neighboring region pair is connected
+        through a sufficiently narrow neck.
+    """
+    sub_labels = np.asarray(sub_labels, dtype=np.int32)
+    distance_map = np.asarray(distance_map, dtype=np.float64)
+
+    part_ids = [
+        int(label_id)
+        for label_id in np.unique(sub_labels)
+        if label_id > 0
+    ]
+
+    if len(part_ids) < 2:
+        return False
+
+    for index, part_a in enumerate(part_ids):
+        mask_a = sub_labels == part_a
+
+        if not np.any(mask_a):
+            continue
+
+        # Use the 95th percentile instead of the absolute maximum
+        # so that one noisy pixel does not control the measurement.
+        radius_a = float(
+            np.percentile(
+                distance_map[mask_a],
+                95
+            )
+        )
+
+        dilated_a = ndi.binary_dilation(
+            mask_a,
+            iterations=int(boundary_dilation)
+        )
+
+        for part_b in part_ids[index + 1:]:
+            mask_b = sub_labels == part_b
+
+            if not np.any(mask_b):
+                continue
+
+            dilated_b = ndi.binary_dilation(
+                mask_b,
+                iterations=int(boundary_dilation)
+            )
+
+            # Intersection of the expanded regions approximates
+            # their shared watershed boundary/contact zone.
+            contact_zone = dilated_a & dilated_b
+
+            if not np.any(contact_zone):
+                continue
+
+            radius_b = float(
+                np.percentile(
+                    distance_map[mask_b],
+                    95
+                )
+            )
+
+            reference_radius = min(
+                radius_a,
+                radius_b
+            )
+
+            if reference_radius <= EPS_NUM:
+                continue
+
+            neck_radius = float(
+                np.median(
+                    distance_map[contact_zone]
+                )
+            )
+
+            neck_ratio = (
+                neck_radius
+                / reference_radius
+            )
+
+            if neck_ratio <= float(neck_ratio_threshold):
+                return True
+
+    return False
+
 
 def split_suspicious_labels_with_distance_watershed(
     labels_img,
     tile_mask,
-    min_region_pixels=50
+    min_region_pixels=50,
+    use_neck_validation=True,
+    neck_ratio_threshold=0.55,
+    use_h_maxima=True,
+    h_maxima_value=3.0
 ):
     refined = labels_img.copy().astype(np.int32)
     next_label = int(refined.max()) + 1
@@ -1301,27 +1423,53 @@ def split_suspicious_labels_with_distance_watershed(
                 sigma=v["sigma"]
             )
 
-            coords = peak_local_max(
-                distance_smooth,
-                labels=region,
-                min_distance=v["min_distance"],
-                exclude_border=False
-            )
+            # ----------------------------------
+            # Select marker-generation method
+            # ----------------------------------
+            if use_h_maxima:
 
-            # no possible split
-            if len(coords) <= 1:
-                continue
+                maxima_mask = h_maxima(
+                    distance_smooth,
+                    h=float(h_maxima_value)
+                )
 
-            markers = np.zeros(
-                region.shape,
-                dtype=np.int32
-            )
+                maxima_mask &= region
 
-            for i, (r, c) in enumerate(coords, start=1):
-                markers[r, c] = i
+                markers, marker_count = ndi.label(
+                    maxima_mask
+                )
 
-            markers = ndi.label(markers > 0)[0]
+                if marker_count <= 1:
+                    continue
 
+            else:
+                # Original marker-generation behavior
+                coords = peak_local_max(
+                    distance_smooth,
+                    labels=region,
+                    min_distance=v["min_distance"],
+                    exclude_border=False
+                )
+
+                if len(coords) <= 1:
+                    continue
+
+                markers = np.zeros(
+                    region.shape,
+                    dtype=np.int32
+                )
+
+                for i, (r, c) in enumerate(coords, start=1):
+                    markers[r, c] = i
+
+                markers = ndi.label(
+                    markers > 0
+                )[0]
+
+            # ----------------------------------
+            # Shared watershed step
+            # Runs for both marker methods
+            # ----------------------------------
             sub_labels = watershed(
                 -distance_smooth,
                 markers,
@@ -1330,8 +1478,33 @@ def split_suspicious_labels_with_distance_watershed(
 
             n_parts = int(sub_labels.max())
 
-            if n_parts > 1:
-                split_results.append(sub_labels)
+            if n_parts <= 1:
+                continue
+
+            # ----------------------------------
+            # Optional neck validation
+            # ----------------------------------
+            if use_neck_validation:
+                valid_split = is_real_touching_split(
+                    sub_labels=sub_labels,
+                    distance_map=distance_smooth,
+                    neck_ratio_threshold=neck_ratio_threshold,
+                    boundary_dilation=1
+                )
+
+                if not valid_split:
+                    print(
+                        f"[neck-check] label {label_id}: "
+                        f"candidate split rejected"
+                    )
+                    continue
+
+                print(
+                    f"[neck-check] label {label_id}: "
+                    f"candidate split accepted"
+                )
+
+            split_results.append(sub_labels)
 
         # ----------------------------------
         # Stability check
