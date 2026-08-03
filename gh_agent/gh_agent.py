@@ -3927,6 +3927,144 @@ class GrasshopperAgent:
                 "session": session,
             })
 
+        if (
+            command
+            == "developer_finish_project_pipeline"
+        ):
+            session = str(
+                message.get("session") or ""
+            ).strip()
+
+            action_id = str(
+                message.get("action_id") or ""
+            ).strip()
+
+            confirmation = str(
+                message.get("confirmation") or ""
+            ).strip()
+
+            reason = str(
+                message.get("reason") or ""
+            ).strip()
+
+            if not session:
+                return error_response(
+                    "Missing session."
+                )
+
+            if not action_id:
+                return error_response(
+                    "Missing action_id."
+                )
+
+            if confirmation != "FINISH_PIPELINE":
+                return error_response(
+                    "Invalid confirmation. Expected "
+                    "'FINISH_PIPELINE'."
+                )
+
+            payload = {
+                "command": (
+                    "developer_finish_project_pipeline"
+                ),
+                "session": session,
+                "action_id": action_id,
+                "confirmation": confirmation,
+                "reason": reason,
+                "requested_by": (
+                    "grasshopper_development_terminator"
+                ),
+            }
+
+            try:
+                master_response = (
+                    self.python_client.send_command(
+                        payload
+                    )
+                )
+
+                if (
+                    master_response.get("status")
+                    != "ok"
+                ):
+                    return master_response
+
+                already_terminal = bool(
+                    master_response.get(
+                        "already_terminal",
+                        False,
+                    )
+                )
+
+                local_finish_response = (
+                    self.finish_local_project_action(
+                        status="completed",
+                        message=(
+                            "Local run_design action completed "
+                            "by development pipeline terminator."
+                        ),
+                        result={
+                            "development_override": True,
+                            "already_terminal": (
+                                already_terminal
+                            ),
+                            "master_response": (
+                                master_response
+                            ),
+                        },
+                        error=None,
+                        action_id=action_id,
+                    )
+                )
+
+                if (
+                    local_finish_response.get("status")
+                    != "ok"
+                ):
+                    return error_response(
+                        message=(
+                            "Master pipeline was finished, but "
+                            "the local action could not be "
+                            "marked completed: "
+                            + str(
+                                local_finish_response.get(
+                                    "message"
+                                )
+                            )
+                        ),
+                        master_response=master_response,
+                        local_finish=(
+                            local_finish_response
+                        ),
+                    )
+
+                return ok_response(
+                    message=(
+                        "Development pipeline termination "
+                        "completed."
+                    ),
+                    session=session,
+                    action_id=action_id,
+                    already_terminal=already_terminal,
+                    master_response=master_response,
+                    local_action=(
+                        local_finish_response.get(
+                            "action"
+                        )
+                    ),
+                    project_pipeline=(
+                        master_response.get(
+                            "project_pipeline"
+                        )
+                    ),
+                )
+
+            except Exception as exc:
+                return error_response(
+                    "Could not finish project pipeline: "
+                    f"{exc}"
+                )
+
         if command == "consume_local_project_action":
             return (
                 self.consume_local_project_action()

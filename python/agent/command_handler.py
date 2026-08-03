@@ -131,6 +131,16 @@ class CommandHandler:
                 message
             )
 
+        if (
+            command
+            == "developer_finish_project_pipeline"
+        ):
+            return (
+                self.handle_developer_finish_project_pipeline(
+                    message
+                )
+            )
+
         return error_response(f"Unknown command: {command}")
 
     def handle_ping(self):
@@ -1126,6 +1136,89 @@ class CommandHandler:
             return error_response(
                 "Could not report project "
                 f"action: {exc}"
+            )
+
+    def handle_developer_finish_project_pipeline(
+        self,
+        message,
+    ):
+        session = str(
+            message.get("session") or ""
+        ).strip()
+
+        action_id = str(
+            message.get("action_id") or ""
+        ).strip()
+
+        confirmation = str(
+            message.get("confirmation") or ""
+        ).strip()
+
+        reason = str(
+            message.get("reason") or ""
+        ).strip()
+
+        requested_by = str(
+            message.get("requested_by")
+            or "grasshopper_development_terminator"
+        ).strip()
+
+        if not session:
+            return error_response(
+                "Missing session."
+            )
+
+        if not action_id:
+            return error_response(
+                "Missing action_id."
+            )
+
+        if confirmation != "FINISH_PIPELINE":
+            return error_response(
+                "Invalid confirmation. Expected "
+                "'FINISH_PIPELINE'."
+            )
+
+        try:
+            result = (
+                self.project_pipeline
+                .developer_finish_pipeline(
+                    session=session,
+                    action_id=action_id,
+                    reason=reason,
+                    requested_by=requested_by,
+                )
+            )
+
+            return ok_response(
+                message=result.get(
+                    "message",
+                    (
+                        "Project pipeline finished by "
+                        "development override."
+                    ),
+                ),
+                session=session,
+                action=result.get("action"),
+                already_terminal=result.get(
+                    "already_terminal",
+                    False,
+                ),
+                project_pipeline=result.get(
+                    "project_pipeline"
+                ),
+                development_override=True,
+            )
+
+        except FileNotFoundError as exc:
+            return error_response(
+                str(exc)
+            )
+
+        except Exception as exc:
+            return error_response(
+                "Could not finish project pipeline "
+                f"with development override: {exc}"
             )
 
     # def handle_get_file_metadata(self, message):

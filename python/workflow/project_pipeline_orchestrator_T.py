@@ -445,6 +445,172 @@ class ProjectPipelineOrchestrator:
             ),
         )
 
+    def developer_finish_pipeline(
+        self,
+        session: str,
+        *,
+        action_id: str,
+        reason: str = "",
+        requested_by: str = (
+            "grasshopper_development_terminator"
+        ),
+    ) -> dict[str, Any]:
+        """
+        Development-only override that closes the current Design action
+        and marks the project pipeline as finished without requiring
+        Design_Output or Motion_Output manifests.
+
+        This must not be used for normal production completion.
+        """
+
+        session_name = self._validate_session(
+            session
+        )
+
+        normalized_action_id = str(
+            action_id or ""
+        ).strip()
+
+        if not normalized_action_id:
+            raise ValueError(
+                "action_id cannot be empty."
+            )
+
+        state = self.state_store.load(
+            session_name
+        )
+
+        current_status = self._normalize(
+            state.get("status")
+        )
+
+        if current_status in self.TERMINAL_STATUSES:
+            return {
+                "session": session_name,
+                "already_terminal": True,
+                "project_pipeline": state,
+                "action": None,
+                "message": (
+                    "Project pipeline is already in "
+                    f"terminal status '{current_status}'."
+                ),
+            }
+
+        allowed_statuses = {
+            "design_pending",
+            "design_requested",
+            "design_running",
+            "design_finished",
+        }
+
+        if current_status not in allowed_statuses:
+            raise RuntimeError(
+                "Development pipeline termination is only "
+                "allowed during the Design stage. "
+                f"Current status: '{current_status}'."
+            )
+
+        pending_action = state.get(
+            "pending_action"
+        )
+
+        if not isinstance(
+            pending_action,
+            dict,
+        ):
+            raise RuntimeError(
+                "No current project action exists."
+            )
+
+        stored_action_id = str(
+            pending_action.get("action_id")
+            or ""
+        ).strip()
+
+        if stored_action_id != normalized_action_id:
+            raise RuntimeError(
+                "action_id does not match the current "
+                "project action."
+            )
+
+        action_name = self._normalize(
+            pending_action.get("action")
+        )
+
+        if action_name != "run_design":
+            raise RuntimeError(
+                "The current project action is not run_design."
+            )
+
+        action = self.state_store.report_pending_action(
+            session=session_name,
+            action_id=normalized_action_id,
+            status="completed",
+            message=(
+                "Design action completed by development "
+                "pipeline terminator."
+            ),
+            result={
+                "development_override": True,
+                "reason": str(reason or ""),
+                "requested_by": str(
+                    requested_by or ""
+                ),
+            },
+            error=None,
+        )
+
+        self.state_store.clear_pending_action(
+            session=session_name,
+            expected_action_id=normalized_action_id,
+        )
+
+        updated = self.state_store.transition(
+            session=session_name,
+            new_status="pipeline_finished",
+            expected_status=current_status,
+            message=(
+                "Project pipeline finished by development "
+                "override after processing output became "
+                "available."
+            ),
+            job_id=None,
+            metadata={
+                "development_override": True,
+                "finish_mode": (
+                    "processing_design_entry_only"
+                ),
+                "finished_without_design_output": True,
+                "finished_without_motion_output": True,
+                "terminated_action_id": (
+                    normalized_action_id
+                ),
+                "reason": str(reason or ""),
+                "requested_by": str(
+                    requested_by or ""
+                ),
+            },
+        )
+
+        # transition(active_stage=None) does not currently clear the
+        # existing field, so explicitly clear it through update().
+        updated = self.state_store.update(
+            session=session_name,
+            active_stage=None,
+            active_job_id=None,
+        )
+
+        return {
+            "session": session_name,
+            "already_terminal": False,
+            "project_pipeline": updated,
+            "action": action,
+            "message": (
+                "Project pipeline was finished by the "
+                "development override."
+            ),
+        }
+
     def _evaluate_design_stage(
         self,
         session: str,
