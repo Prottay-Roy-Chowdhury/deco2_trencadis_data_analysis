@@ -1079,6 +1079,7 @@ def main():
         visualizer.launch(
             camera_position=[-1.8, 2.0, 1.6],
             camera_look_at=[0.0, 0.0, 0.8],
+            lighting="soft",
         )
 
         # ----------------------------------------------------
